@@ -87,9 +87,10 @@ for TASK in $ALL_TASKS; do
 
     set +e
     RAW_LOG="benchmark-raw-$(date +%Y%m%d-%H%M%S).log"
-    OUTPUT=$(a3s bench run "$TASK" --agent a3s-code --model "$MODEL" 2>&1 | tee -a "$RAW_LOG")
-    EXIT_CODE=$?
+    a3s bench run "$TASK" --agent a3s-code --model "$MODEL" 2>&1 | tee "$RAW_LOG"
+    EXIT_CODE=${PIPESTATUS[0]}
     set -e
+    OUTPUT=$(cat "$RAW_LOG")
 
     END_TIME=$(date +%s)
     DURATION=$((END_TIME - START_TIME))
@@ -106,6 +107,8 @@ for TASK in $ALL_TASKS; do
         PASSED=$((PASSED + 1))
     else
         FAILED=$((FAILED + 1))
+        ERROR=$(echo "$OUTPUT" | grep -oP '(?<=failed: ).*' | head -1 || echo "(no details)")
+        echo "  => ERROR: $ERROR"
     fi
 
     docker rm -f $(docker ps -a --filter "name=a3s-bench" --format "{{.Names}}" 2>/dev/null) 2>/dev/null || true

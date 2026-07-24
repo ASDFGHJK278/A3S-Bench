@@ -9,15 +9,13 @@ OCI workspace seed containing symlinks causes benchmark to bail
 
 
 
-<!-- 编辑新问题的正文，然后单击编辑器右上角的 ✓“创建问题”按钮。第一行将是问题标题。代理人和标签紧跟在空白行后面。在开始问题正文之前留出空行。 -->
+<!-- 编辑新问题的正文，然后单击编辑器右上角的 ✓"创建问题"按钮。第一行将是问题标题。代理人和标签紧跟在空白行后面。在开始问题正文之前留出空行。 -->
 
-## 现象
+## Symptom
 
-当 workspace OCI seed 中包含符号链接时，a3s-bench 的安全机制拒绝解压，导致 7 个任务无法运行：
+When the workspace OCI seed contains symbolic links, a3s-bench's safety mechanism refuses to extract it, causing 7 tasks to be unable to run.
 
-
-
-受影响的任务：
+Affected tasks:
 - arc_compiler_runtime
 - carleson_formalization
 - flt_regular_formalization
@@ -26,15 +24,11 @@ OCI workspace seed containing symlinks causes benchmark to bail
 - pfr_formalization
 - sphere_eversion_formalization
 
-## 根因
+## Root Cause
 
-这些任务的 OCI 镜像中的 workspace seed 包含 symbolic link，来自上游 EdgeBench 镜像构建。a3s-bench 的安全机制为 symlink 可能导致的路径穿越问题而禁止解压含 symlink 的 seed 文件。
+The OCI images for these tasks contain workspace seeds with symbolic links. a3s-bench's safety mechanism rejects extracting seeds containing symlinks due to potential path traversal, using `anyhow::ensure!` to bail directly.
 
-## 修复
+## Environment
 
-已在 commit a48c62f 中修复：将 symlink 解压为普通文件（复制目标文件内容），而不是拒绝解压。
-
-## 环境
-
-- a3s-bench 框架的 workspace materialization 组件
-- OCI 镜像中的内嵌 workspace seed
+- a3s-bench workspace materialization component (`src/workspace.rs`)
+- Embedded workspace seed in OCI images

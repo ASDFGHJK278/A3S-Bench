@@ -9,23 +9,17 @@ Process hangs indefinitely during long-running candidate execution
 
 
 
-<!-- 编辑新问题的正文，然后单击编辑器右上角的 ✓“创建问题”按钮。第一行将是问题标题。代理人和标签紧跟在空白行后面。在开始问题正文之前留出空行。 -->
+<!-- 编辑新问题的正文，然后单击编辑器右上角的 ✓"创建问题"按钮。第一行将是问题标题。代理人和标签紧跟在空白行后面。在开始问题正文之前留出空行。 -->
 
-## 现象
+## Symptom
 
-在长时间运行的候选模型评测中，进程会无限挂起而不产生任何错误信息，导致 benchmark 当前任务超时。
+During long-running candidate model evaluation, the process hangs indefinitely without producing any error output. The benchmark task times out and must be killed manually.
 
-## 根因
+## Root Cause
 
-问题发生在 Rust 的 std::process::Command 通过管道读取子进程的 stdout/stderr 时。当子进程的输出缓冲区被填满时：
+`output_with_timeout()` uses pipes (`Stdio::piped()`) to read the child process's stdout/stderr. Docker CLI may share the pipe file descriptors with containerd-shim. Even after Docker CLI exits, containerd-shim continues to hold the write end, preventing the parent process's `read_to_end` from ever receiving EOF, causing the process to hang indefinitely.
 
-1. 子进程因为管道的读端未被读取而阻塞在写入操作上
-2. 父进程在等待子进程结束，而没有同步读取管道
+## Environment
 
-这导致父子进程互相等待的死锁。
-
-## 环境
-
-- a3s-bench 框架的 candidate runner
-- Rust 的 std::process::Command 实现
-- 子进程产生大量输出的场景
+- a3s-bench candidate runner (`src/runtime.rs`)
+- Docker CLI + containerd-shim

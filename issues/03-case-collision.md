@@ -13,7 +13,7 @@ Case-collision check in terminal workspace is fatal, causing unnecessary file lo
 
 ## Symptom
 
-During workspace collection, when file names differing only in case are detected, the original implementation terminates immediately; a later change made it skip the colliding file. Both approaches result in submitted files being lost, and the judge cannot receive the complete submission.
+During workspace collection, when file names differing only in case are detected, the original implementation terminates immediately, result in submitted files being lost, and the judge cannot receive the complete submission.
 
 Confirmed affected tasks:
 - schemathesis_config_modernization

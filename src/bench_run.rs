@@ -58,6 +58,10 @@ fn execute_inner(
         crate::os_runtime::PROVIDER => {
             validate_os_runtime_task(&loaded.task, loaded.model.as_deref())?
         }
+        crate::runtime_selection::HOST_PROVIDER => {
+            // Host runtime runs on the host directly; no Docker images to resolve.
+            // Game-server judges still need Docker, so keep them available.
+        }
         provider => anyhow::bail!(
             "execution through configured Runtime {provider:?} is not implemented yet"
         ),
@@ -183,10 +187,16 @@ fn execute_candidate(
     runtime_execution: &RuntimeExecution<'_>,
 ) -> Result<Option<model_candidate::ModelExecution>> {
     let Some(model) = model else {
-        anyhow::ensure!(
-            game.is_none(),
-            "interactive game Tasks require a model-backed Candidate"
-        );
+        // Game tasks with Docker or os-runtime still need a model-backed Candidate.
+        // The host runtime can run executable Candidates for game tasks because
+        // the host Candidate has full network access to the published game port.
+        if runtime_execution.provider != crate::runtime_selection::HOST_PROVIDER {
+            anyhow::ensure!(
+                game.is_none(),
+                "interactive game Tasks require a model-backed Candidate"
+            );
+        }
+        let game_url = game.and_then(|session| session.host_url());
         match runtime_execution.provider {
             "docker" => runtime::execute_docker_candidate(task, candidate, candidate_workspace)?,
             crate::os_runtime::PROVIDER => crate::os_runtime::execute_candidate(
@@ -195,6 +205,14 @@ fn execute_candidate(
                 candidate_workspace,
                 runtime_execution.resolved_images,
             )?,
+            crate::runtime_selection::HOST_PROVIDER => {
+                runtime::execute_host_candidate(
+                    task,
+                    candidate,
+                    candidate_workspace,
+                    game_url.as_deref(),
+                )?
+            }
             provider => anyhow::bail!("Candidate Runtime {provider:?} is not implemented"),
         }
         return Ok(None);
@@ -260,6 +278,9 @@ fn execute_judge(
             "docker" => runtime::execute_docker_judge(task, judge, submission),
             crate::os_runtime::PROVIDER => {
                 crate::os_runtime::execute_judge(task, judge, submission, resolved_images)
+            }
+            crate::runtime_selection::HOST_PROVIDER => {
+                runtime::execute_host_judge(task, judge, submission)
             }
             provider => anyhow::bail!("Judge Runtime {provider:?} is not implemented"),
         }

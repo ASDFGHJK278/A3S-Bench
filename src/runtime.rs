@@ -6,7 +6,7 @@ use std::process::{Command, Output};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{Duration, Instant};
 
-use crate::runtime_selection::{RuntimeSelection, A3S_BOX_PROVIDER, DOCKER_PROVIDER};
+use crate::runtime_selection::{RuntimeSelection, A3S_BOX_PROVIDER, DOCKER_PROVIDER, HOST_PROVIDER};
 
 static CANDIDATE_SEQUENCE: AtomicU64 = AtomicU64::new(0);
 
@@ -199,6 +199,88 @@ pub fn execute_docker_candidate(
     Ok(())
 }
 
+pub fn execute_host_candidate(
+    task: &TaskInfo,
+    candidate: &LocalAssetPackage,
+    workspace: &Path,
+    game_url: Option<&str>,
+) -> Result<()> {
+    let entrypoint = candidate
+        .entrypoint
+        .split(':')
+        .next()
+        .unwrap_or(&candidate.entrypoint);
+    let entrypoint_path = candidate.root.join(entrypoint);
+    anyhow::ensure!(
+        entrypoint_path.is_file(),
+        "Candidate entrypoint is missing: {entrypoint}"
+    );
+    let mut command = Command::new("/bin/sh");
+    command
+        .arg(&entrypoint_path)
+        .arg(workspace)
+        .current_dir(workspace)
+        .env("A3S_TASK_ROOT", &task.root);
+    if let Some(url) = game_url {
+        command.env("A3S_GAME_SERVER_URL", url);
+    }
+    let (candidate_output, timed_out) = output_with_timeout(
+        &mut command,
+        Duration::from_secs(task.candidate_timeout_sec),
+    )
+    .context("could not start host Candidate")?;
+    // Best-effort: break any hard links in the workspace so that submission
+    // projection does not reject them. This runs even on timeout, since the
+    // benchmark still scores whatever the candidate produced.
+    break_hard_links(workspace);
+
+    if timed_out {
+        anyhow::bail!(
+            "Candidate exceeded Task solution_timeout_sec ({})",
+            task.candidate_timeout_sec
+        );
+    }
+    anyhow::ensure!(
+        candidate_output.status.success(),
+        "Candidate exited with {}: {}",
+        candidate_output.status,
+        String::from_utf8_lossy(&candidate_output.stderr).trim()
+    );
+    Ok(())
+}
+
+/// Replace every file with `nlink > 1` by an independent copy so that the
+/// submission validator (which rejects hard links) does not reject the
+/// workspace.
+fn break_hard_links(root: &Path) {
+    let Ok(entries) = std::fs::read_dir(root) else {
+        return;
+    };
+    for entry in entries.flatten() {
+        let path = entry.path();
+        let Ok(file_type) = entry.file_type() else {
+            continue;
+        };
+        if file_type.is_dir() {
+            break_hard_links(&path);
+        } else if file_type.is_file() {
+            #[cfg(unix)]
+            {
+                use std::os::unix::fs::MetadataExt;
+                let Ok(meta) = entry.metadata() else {
+                    continue;
+                };
+                if meta.nlink() > 1 {
+                    let tmp = path.with_extension("a3s_hlink_fix");
+                    if std::fs::copy(&path, &tmp).is_ok() {
+                        let _ = std::fs::rename(&tmp, &path);
+                    }
+                }
+            }
+        }
+    }
+}
+
 fn output_with_timeout(command: &mut Command, timeout: Duration) -> Result<(Output, bool)> {
     use std::io::Read;
     use std::fs::File;
@@ -347,6 +429,65 @@ print(json.dumps(getattr(mod,{})({{'submission_root':'/submission','hidden_bundl
     Ok(result)
 }
 
+pub fn execute_host_judge(
+    task: &TaskInfo,
+    judge: &LocalAssetPackage,
+    submission: &Path,
+) -> Result<JudgeResult> {
+    let hidden_root = task.root.join("private/bundle").canonicalize()?;
+    let (entrypoint_file, entrypoint_function) = judge
+        .entrypoint
+        .split_once(':')
+        .ok_or_else(|| anyhow::anyhow!("Judge entrypoint must use file.py:function form"))?;
+    anyhow::ensure!(
+        entrypoint_file.ends_with(".py")
+            && !entrypoint_file.starts_with('/')
+            && !entrypoint_file.contains(".."),
+        "Judge entrypoint file is invalid"
+    );
+    anyhow::ensure!(
+        !entrypoint_function.is_empty()
+            && entrypoint_function
+                .bytes()
+                .all(|byte| byte.is_ascii_alphanumeric() || byte == b'_'),
+        "Judge entrypoint function is invalid"
+    );
+    let judge_file = judge.root.join(entrypoint_file);
+    anyhow::ensure!(
+        judge_file.is_file(),
+        "Judge entrypoint file is missing: {entrypoint_file}"
+    );
+    let script = format!(
+        "import importlib.util,json,sys
+spec=importlib.util.spec_from_file_location('judge',{})
+mod=importlib.util.module_from_spec(spec);spec.loader.exec_module(mod)
+print(json.dumps(getattr(mod,{})({{'submission_root':{},'hidden_bundle_root':{}}}),separators=(',',':')))",
+        serde_json::to_string(&judge_file.to_string_lossy())?,
+        serde_json::to_string(entrypoint_function)?,
+        serde_json::to_string(&submission.to_string_lossy())?,
+        serde_json::to_string(&hidden_root.to_string_lossy())?
+    );
+    let output = Command::new("python3")
+        .arg("-c")
+        .arg(&script)
+        .output()
+        .context("could not start host Judge")?;
+    anyhow::ensure!(
+        output.status.success(),
+        "Judge failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let result: JudgeResult =
+        serde_json::from_slice(&output.stdout).context("Judge returned invalid JSON")?;
+    anyhow::ensure!(
+        result.schema == "bench.judge.result.v1",
+        "Judge returned unsupported schema {}",
+        result.schema
+    );
+    validate_judge_result(task, &result)?;
+    Ok(result)
+}
+
 fn configure_mounted_tree_owner(command: &mut Command, path: &Path) -> Result<()> {
     #[cfg(unix)]
     {
@@ -412,6 +553,7 @@ pub fn preflight(selection: &RuntimeSelection) -> Result<RuntimeStatus> {
     match selection.provider.as_str() {
         DOCKER_PROVIDER => docker_preflight(),
         A3S_BOX_PROVIDER => command_preflight("a3s-box", &["--version"], "a3s-box"),
+        HOST_PROVIDER => host_preflight(),
         crate::os_runtime::PROVIDER => crate::os_runtime::preflight(),
         provider => Err(anyhow::anyhow!(
             "configured Runtime provider {provider:?} is not installed; provider selection never falls back to Docker"
@@ -425,6 +567,26 @@ fn docker_preflight() -> Result<RuntimeStatus> {
         &["version", "--format", "{{.Server.Version}}"],
         "docker",
     )
+}
+
+fn host_preflight() -> Result<RuntimeStatus> {
+    // The host runtime runs candidate entrypoints and Python judges directly
+    // on the host. It requires a Unix-like system with /bin/sh and python3.
+    anyhow::ensure!(
+        cfg!(unix),
+        "host Runtime provider is only supported on Unix-like systems"
+    );
+    let sh = std::path::Path::new("/bin/sh");
+    anyhow::ensure!(
+        sh.is_file(),
+        "host Runtime provider requires /bin/sh"
+    );
+    let python = command_preflight_output("python3", &["--version"])?;
+    Ok(RuntimeStatus {
+        provider: HOST_PROVIDER.to_owned(),
+        ready: true,
+        detail: python,
+    })
 }
 
 fn command_preflight(command: &str, args: &[&str], provider: &str) -> Result<RuntimeStatus> {

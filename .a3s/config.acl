@@ -1,0 +1,20 @@
+runtime {
+  provider = "host"
+}
+
+bench {
+  judge_model = "openai/glm-5.2"
+}
+
+providers "openai" {
+  api_key  = "sk-35a37df6f3b2b6e2dd3e521137457459"
+  base_url = "https://token.pjlab.org.cn/"
+
+  models "glm-5.2" {
+    name = "glm-5.2"
+  }
+
+  models "deepseek-v4-flash" {
+    name = "deepseek-v4-flash"
+  }
+}

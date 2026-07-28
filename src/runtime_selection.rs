@@ -2,6 +2,7 @@ use a3s_runtime::{ProviderId, RuntimeResult};
 
 pub const DOCKER_PROVIDER: &str = "docker";
 pub const A3S_BOX_PROVIDER: &str = "a3s-box";
+pub const HOST_PROVIDER: &str = "host";
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum RuntimeSelectionSource {

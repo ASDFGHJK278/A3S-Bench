@@ -59,8 +59,9 @@ fn execute_inner(
             validate_os_runtime_task(&loaded.task, loaded.model.as_deref())?
         }
         crate::runtime_selection::HOST_PROVIDER => {
-            // Host runtime runs on the host directly; no Docker images to resolve.
-            // Game-server judges still need Docker, so keep them available.
+            // Candidate runs on host, but judge still runs in Docker,
+            // so task images must be resolved.
+            resolve_task_images(&mut loaded.task, &loaded.resolved_images)?
         }
         provider => anyhow::bail!(
             "execution through configured Runtime {provider:?} is not implemented yet"
@@ -275,12 +276,11 @@ fn execute_judge(
         legacy_judge::execute(task, source, submission, model)
     } else {
         match runtime_provider {
-            "docker" => runtime::execute_docker_judge(task, judge, submission),
+            "docker" | crate::runtime_selection::HOST_PROVIDER => {
+                runtime::execute_docker_judge(task, judge, submission)
+            }
             crate::os_runtime::PROVIDER => {
                 crate::os_runtime::execute_judge(task, judge, submission, resolved_images)
-            }
-            crate::runtime_selection::HOST_PROVIDER => {
-                runtime::execute_host_judge(task, judge, submission)
             }
             provider => anyhow::bail!("Judge Runtime {provider:?} is not implemented"),
         }

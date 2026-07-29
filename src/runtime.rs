@@ -429,65 +429,6 @@ print(json.dumps(getattr(mod,{})({{'submission_root':'/submission','hidden_bundl
     Ok(result)
 }
 
-pub fn execute_host_judge(
-    task: &TaskInfo,
-    judge: &LocalAssetPackage,
-    submission: &Path,
-) -> Result<JudgeResult> {
-    let hidden_root = task.root.join("private/bundle").canonicalize()?;
-    let (entrypoint_file, entrypoint_function) = judge
-        .entrypoint
-        .split_once(':')
-        .ok_or_else(|| anyhow::anyhow!("Judge entrypoint must use file.py:function form"))?;
-    anyhow::ensure!(
-        entrypoint_file.ends_with(".py")
-            && !entrypoint_file.starts_with('/')
-            && !entrypoint_file.contains(".."),
-        "Judge entrypoint file is invalid"
-    );
-    anyhow::ensure!(
-        !entrypoint_function.is_empty()
-            && entrypoint_function
-                .bytes()
-                .all(|byte| byte.is_ascii_alphanumeric() || byte == b'_'),
-        "Judge entrypoint function is invalid"
-    );
-    let judge_file = judge.root.join(entrypoint_file);
-    anyhow::ensure!(
-        judge_file.is_file(),
-        "Judge entrypoint file is missing: {entrypoint_file}"
-    );
-    let script = format!(
-        "import importlib.util,json,sys
-spec=importlib.util.spec_from_file_location('judge',{})
-mod=importlib.util.module_from_spec(spec);spec.loader.exec_module(mod)
-print(json.dumps(getattr(mod,{})({{'submission_root':{},'hidden_bundle_root':{}}}),separators=(',',':')))",
-        serde_json::to_string(&judge_file.to_string_lossy())?,
-        serde_json::to_string(entrypoint_function)?,
-        serde_json::to_string(&submission.to_string_lossy())?,
-        serde_json::to_string(&hidden_root.to_string_lossy())?
-    );
-    let output = Command::new("python3")
-        .arg("-c")
-        .arg(&script)
-        .output()
-        .context("could not start host Judge")?;
-    anyhow::ensure!(
-        output.status.success(),
-        "Judge failed: {}",
-        String::from_utf8_lossy(&output.stderr)
-    );
-    let result: JudgeResult =
-        serde_json::from_slice(&output.stdout).context("Judge returned invalid JSON")?;
-    anyhow::ensure!(
-        result.schema == "bench.judge.result.v1",
-        "Judge returned unsupported schema {}",
-        result.schema
-    );
-    validate_judge_result(task, &result)?;
-    Ok(result)
-}
-
 fn configure_mounted_tree_owner(command: &mut Command, path: &Path) -> Result<()> {
     #[cfg(unix)]
     {
@@ -570,8 +511,8 @@ fn docker_preflight() -> Result<RuntimeStatus> {
 }
 
 fn host_preflight() -> Result<RuntimeStatus> {
-    // The host runtime runs candidate entrypoints and Python judges directly
-    // on the host. It requires a Unix-like system with /bin/sh and python3.
+    // The host runtime runs candidate entrypoints directly on the host.
+    // Judges still run in Docker. Only /bin/sh is required.
     anyhow::ensure!(
         cfg!(unix),
         "host Runtime provider is only supported on Unix-like systems"
@@ -581,11 +522,10 @@ fn host_preflight() -> Result<RuntimeStatus> {
         sh.is_file(),
         "host Runtime provider requires /bin/sh"
     );
-    let python = command_preflight_output("python3", &["--version"])?;
     Ok(RuntimeStatus {
         provider: HOST_PROVIDER.to_owned(),
         ready: true,
-        detail: python,
+        detail: "host candidate runtime".to_owned(),
     })
 }
 

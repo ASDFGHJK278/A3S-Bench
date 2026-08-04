@@ -82,55 +82,24 @@ for TASK in $ALL_TASKS; do
 
     RAW_LOG="benchmark-raw-$(date +%Y%m%d-%H%M%S).log"
 
-    # 用 --json 输出，可靠解析；exit code 作为第一道失败信号
-    a3s bench run "$TASK" --agent a3s-code --model "$MODEL" --json > "$RAW_LOG" 2>&1
-    EXIT_CODE=$?
+    # 原样运行，输出同时写到终端和日志文件，不做任何加工
+    a3s bench run "$TASK" --agent a3s-code --model "$MODEL" 2>&1 | tee "$RAW_LOG"
+    EXIT_CODE=${PIPESTATUS[0]}
 
     END_TIME=$(date +%s)
     DURATION=$((END_TIME - START_TIME))
     DURATION_STR="$((DURATION / 60))m$((DURATION % 60))s"
 
-    # 用 Python 解析 JSON，提取 score / status / error，避免 grep 脆弱匹配
-    PARSED=$(python3 - "$RAW_LOG" "$EXIT_CODE" <<'PY'
-import json, sys
-raw_path, exit_code = sys.argv[1], int(sys.argv[2])
-try:
-    with open(raw_path) as f:
-        obj = json.load(f)
-except Exception as e:
-    print(f"CRASH|N/A|exit_code={exit_code} json_parse_error={e}")
-    sys.exit(0)
-
-ok = obj.get("ok", False)
-data = obj.get("data", {})
-err = obj.get("error", {})
-status = data.get("status", "failed")
-score = data.get("score", "N/A")
-task_id = data.get("task_id", "?")
-cand_status = data.get("candidate_execution", {}).get("status", "unknown")
-
-if not ok or exit_code != 0:
-    msg = err.get("message", f"exit_code={exit_code}")
-    print(f"FAIL|{score}|{msg}")
-elif status == "completed":
-    print(f"PASS|{score}|cand={cand_status}")
-else:
-    print(f"FAIL|{score}|status={status}")
-PY
-)
-    # 显示原始日志到终端
-    cat "$RAW_LOG"
-
-    RESULT=$(echo "$PARSED" | cut -d'|' -f1)
-    SCORE=$(echo "$PARSED" | cut -d'|' -f2)
-    DETAIL=$(echo "$PARSED" | cut -d'|' -f3)
-
-    if [ "$RESULT" = "PASS" ]; then
+    # 判定：exit code 非零就是失败
+    if [ "$EXIT_CODE" -eq 0 ]; then
+        RESULT="PASS"
         PASSED=$((PASSED + 1))
     else
+        RESULT="FAIL"
         FAILED=$((FAILED + 1))
-        echo "  => ERROR: $DETAIL"
     fi
+
+    SCORE=$(grep -oP 'score=\K[0-9.]+' "$RAW_LOG" | head -1 || echo "N/A")
 
     # 清理残留容器，忽略错误
     containers=$(docker ps -a --filter "name=a3s-bench" --format "{{.Names}}" 2>/dev/null)
@@ -138,8 +107,8 @@ PY
         docker rm -f $containers 2>/dev/null || true
     fi
 
-    printf "%-40s | %-6s | %-6s | %s\n" "$TASK" "$RESULT" "$SCORE" "$DURATION_STR" >> "$SUMMARY_FILE"
-    printf "  => %-6s  score=%-6s  time=%s  %s\n" "$RESULT" "$SCORE" "$DURATION_STR" "$DETAIL"
+    printf "%-40s | %-4s | %-6s | %s | exit=%d\n" "$TASK" "$RESULT" "$SCORE" "$DURATION_STR" "$EXIT_CODE" >> "$SUMMARY_FILE"
+    printf "  => %-4s  score=%-6s  time=%s  exit=%d\n" "$RESULT" "$SCORE" "$DURATION_STR" "$EXIT_CODE"
 done
 
 {

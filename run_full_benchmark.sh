@@ -1,7 +1,7 @@
 #!/bin/bash
-set -euo pipefail
+set -uo pipefail
 
-MODEL="${1:-openai/deepseek-v4-flash}"
+MODEL="${1:-openai/glm-5.2}"
 shift 2>/dev/null || true
 
 cd "$(dirname "$0")"
@@ -15,29 +15,24 @@ ALL_TASKS=$(a3s bench list --json | python3 -c "import sys,json; [print(t['id'])
 TASK_COUNT=$(echo "$ALL_TASKS" | wc -l)
 
 # 解析参数：序号、范围、任务名混着写
-#   ./run.sh                                    -> 全跑
-#   ./run.sh model 37                           -> 跑第 37 个
-#   ./run.sh model 37 42                        -> 跑第 37 和 42 个
-#   ./run.sh model 37-42                        -> 跑第 37~42 个
-#   ./run.sh model 37 42 43-45 task_name        -> 混合
+#   ./run_full_benchmark.sh                        -> 全跑
+#   ./run_full_benchmark.sh model 37               -> 跑第 37 个
+#   ./run_full_benchmark.sh model 37 42            -> 跑第 37 和 42 个
+#   ./run_full_benchmark.sh model 37-42            -> 跑第 37~42 个
+#   ./run_full_benchmark.sh model 37 42 43-45 task_name -> 混合
 MATCH_TASKS=""
 if [ $# -eq 0 ]; then
-    # 没参数 = 全跑
     MATCH_TASKS="$ALL_TASKS"
 else
-    # 构建一个 awk 表达式来匹配序号或任务名
     CONDITIONS=""
     for arg in "$@"; do
         if echo "$arg" | grep -qE '^[0-9]+-[0-9]+$'; then
-            # 范围：37-42
             start=$(echo "$arg" | cut -d- -f1)
             end=$(echo "$arg" | cut -d- -f2)
             CONDITIONS="$CONDITIONS || (NR>=$start && NR<=$end)"
         elif echo "$arg" | grep -qE '^[0-9]+$'; then
-            # 单个序号：37
             CONDITIONS="$CONDITIONS || NR==$arg"
         else
-            # 任务名
             CONDITIONS="$CONDITIONS || \$1=="$arg""
         fi
     done
@@ -85,36 +80,66 @@ for TASK in $ALL_TASKS; do
 
     START_TIME=$(date +%s)
 
-    set +e
     RAW_LOG="benchmark-raw-$(date +%Y%m%d-%H%M%S).log"
-    a3s bench run "$TASK" --agent a3s-code --model "$MODEL" 2>&1 | tee "$RAW_LOG"
-    EXIT_CODE=${PIPESTATUS[0]}
-    set -e
-    OUTPUT=$(cat "$RAW_LOG")
+
+    # 用 --json 输出，可靠解析；exit code 作为第一道失败信号
+    a3s bench run "$TASK" --agent a3s-code --model "$MODEL" --json > "$RAW_LOG" 2>&1
+    EXIT_CODE=$?
 
     END_TIME=$(date +%s)
     DURATION=$((END_TIME - START_TIME))
     DURATION_STR="$((DURATION / 60))m$((DURATION % 60))s"
 
-    SCORE=$(echo "$OUTPUT" | grep -oP 'score=\K[0-9.]+' | head -1 || echo "N/A")
+    # 用 Python 解析 JSON，提取 score / status / error，避免 grep 脆弱匹配
+    PARSED=$(python3 - "$RAW_LOG" "$EXIT_CODE" <<'PY'
+import json, sys
+raw_path, exit_code = sys.argv[1], int(sys.argv[2])
+try:
+    with open(raw_path) as f:
+        obj = json.load(f)
+except Exception as e:
+    print(f"CRASH|N/A|exit_code={exit_code} json_parse_error={e}")
+    sys.exit(0)
 
-    RESULT="FAIL"
-    if echo "$OUTPUT" | grep -q 'COMPLETED'; then
-        RESULT="PASS"
-    fi
+ok = obj.get("ok", False)
+data = obj.get("data", {})
+err = obj.get("error", {})
+status = data.get("status", "failed")
+score = data.get("score", "N/A")
+task_id = data.get("task_id", "?")
+cand_status = data.get("candidate_execution", {}).get("status", "unknown")
+
+if not ok or exit_code != 0:
+    msg = err.get("message", f"exit_code={exit_code}")
+    print(f"FAIL|{score}|{msg}")
+elif status == "completed":
+    print(f"PASS|{score}|cand={cand_status}")
+else:
+    print(f"FAIL|{score}|status={status}")
+PY
+)
+    # 显示原始日志到终端
+    cat "$RAW_LOG"
+
+    RESULT=$(echo "$PARSED" | cut -d'|' -f1)
+    SCORE=$(echo "$PARSED" | cut -d'|' -f2)
+    DETAIL=$(echo "$PARSED" | cut -d'|' -f3)
 
     if [ "$RESULT" = "PASS" ]; then
         PASSED=$((PASSED + 1))
     else
         FAILED=$((FAILED + 1))
-        ERROR=$(echo "$OUTPUT" | grep -oP '(?<=failed: ).*' | head -1 || echo "(no details)")
-        echo "  => ERROR: $ERROR"
+        echo "  => ERROR: $DETAIL"
     fi
 
-    docker rm -f $(docker ps -a --filter "name=a3s-bench" --format "{{.Names}}" 2>/dev/null) 2>/dev/null || true
+    # 清理残留容器，忽略错误
+    containers=$(docker ps -a --filter "name=a3s-bench" --format "{{.Names}}" 2>/dev/null)
+    if [ -n "$containers" ]; then
+        docker rm -f $containers 2>/dev/null || true
+    fi
 
-    printf "%-40s | %-4s | %-6s | %s\n" "$TASK" "$RESULT" "$SCORE" "$DURATION_STR" >> "$SUMMARY_FILE"
-    printf "  => %-4s  score=%-6s  time=%s\n" "$RESULT" "$SCORE" "$DURATION_STR"
+    printf "%-40s | %-6s | %-6s | %s\n" "$TASK" "$RESULT" "$SCORE" "$DURATION_STR" >> "$SUMMARY_FILE"
+    printf "  => %-6s  score=%-6s  time=%s  %s\n" "$RESULT" "$SCORE" "$DURATION_STR" "$DETAIL"
 done
 
 {

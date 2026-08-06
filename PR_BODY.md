@@ -6,7 +6,7 @@ This PR builds on v0.1.2 with a series of performance optimizations, judge
 semantics fixes, and operational tooling needed to run large-scale batch
 evaluations. All changes are cleanly ahead of `main` with no divergence.
 
-Closes #1. Closes #2. Closes #3. Closes #4. Closes #5. Closes #6. Closes #7.
+Closes #1. Closes #2. Closes #3. Closes #4. Closes #5. Closes #6. Closes #7. Closes #8.
 
 ## Changes
 
@@ -40,6 +40,13 @@ Closes #1. Closes #2. Closes #3. Closes #4. Closes #5. Closes #6. Closes #7.
   of clamping to 0–1. Previously, judges returning percentage-scale scores had
   all values above 1.0 truncated to 1.0.
 
+- **Agent timeout uses EdgeBench 12-hour budget** (#8): The import script was
+  mapping EdgeBench's per-task `eval_timeout` (judge-script budget, 600–21600s)
+  to `solution_timeout_sec` (agent solving budget). EdgeBench's official
+  leaderboard gives every task a uniform 43200s (12h) agent timeout. All 51
+  imported tasks now use 43200s, while `judge.source.json` keeps the original
+  `eval_timeout` for the judge script.
+
 - **camelCase config compatibility** (#6): `resolve_model_route` now falls back
   to `apiKey`/`baseUrl` when `api_key`/`base_url` is not found, matching the
   behavior of the a3s-code-core config loader. Users no longer need separate
@@ -68,4 +75,4 @@ Closes #1. Closes #2. Closes #3. Closes #4. Closes #5. Closes #6. Closes #7.
 
 ## Issue drafts
 
-Problem descriptions for each fix are documented in `issues/01`–`issues/07`.
+Problem descriptions for each fix are documented in `issues/01`–`issues/08`.

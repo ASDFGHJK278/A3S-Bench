@@ -1,16 +1,16 @@
-候选对话历史未持久化，无法事后复盘
+Candidate conversation history not persisted, preventing post-hoc analysis
 
-标签: enhancement
+Labels: enhancement
 
-## 现象
+## Symptom
 
-模型候选（model candidate）执行完毕后，其完整对话历史（工具调用、模型回复、中间推理）不被保存。评测结束后无法回溯候选的解题过程，难以诊断失败原因或对比不同模型的行为差异。
+After a model candidate finishes execution, its full conversation history (tool calls, model responses, intermediate reasoning) is not saved. Once the evaluation ends, there is no way to review the candidate's problem-solving process, diagnose failures, or compare behavior across different models.
 
-## 根因
+## Root cause
 
-`execute_candidate` 未将 session 快照和 trajectory 写入磁盘。EdgeBench 对此有 `agent_output.txt` 机制，a3s-bench 缺少等价实现。
+`execute_candidate` does not write session snapshots or trajectories to disk. EdgeBench provides an `agent_output.txt` mechanism for this purpose; a3s-bench lacks an equivalent.
 
-## 环境
+## Environment
 
 - a3s-bench v0.1.2
-- 任何使用 model candidate 的评测
+- Any evaluation using a model candidate

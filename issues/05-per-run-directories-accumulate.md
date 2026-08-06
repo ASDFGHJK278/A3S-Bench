@@ -1,16 +1,16 @@
-每次运行的 workspace 和 submission 目录不回收，无限累积
+Per-run workspace and submission directories are never reclaimed, accumulating indefinitely
 
-标签: bug
+Labels: bug
 
-## 现象
+## Symptom
 
-`a3s bench run` 在 `.a3s/bench/workspaces/` 和 `.a3s/bench/submissions/` 下按 `{task_id}-{pid}` 创建运行目录，但运行结束后不清理。批量评测后这些目录（包含完整 workspace 和 submission 树）累积到数十 GB，浪费磁盘空间。
+`a3s bench run` creates per-run directories under `.a3s/bench/workspaces/` and `.a3s/bench/submissions/` named `{task_id}-{pid}`, but never cleans them up after the run completes. After batch-evaluating dozens of tasks, these directories (containing full workspace and submission trees) accumulate to tens of GB, wasting disk space.
 
-## 根因
+## Root cause
 
-`execute_inner` 创建 workspace 和 submission 目录后没有回收逻辑。submission 树被 `seal_role_input_tree` 设为只读（0o555），普通的 `remove_dir_all` 会静默失败，需要先恢复写权限。
+`execute_inner` creates workspace and submission directories but has no reclamation logic. The submission tree is sealed read-only (0o555) by `seal_role_input_tree`, so a plain `remove_dir_all` silently fails — write permissions must be restored first.
 
-## 环境
+## Environment
 
 - a3s-bench v0.1.2
-- 批量评测场景（数十个任务连续运行）
+- Batch evaluation scenarios (dozens of tasks run consecutively)

@@ -1,16 +1,16 @@
-无 rescale 配置时 raw score 被错误截断为 1.0
+Raw score clamped to 1.0 when no rescale config is present
 
-标签: bug
+Labels: bug
 
-## 现象
+## Symptom
 
-部分 Judge 返回 0-100 范围的原始分数。当任务没有 rescale 配置时，`normalize_raw` 直接执行 `raw.clamp(0.0, 1.0)`，所有 >1 的分数被截断为 1.0，导致候选得分严重失真。
+Some judges return raw scores in the 0–100 range. When a task has no rescale configuration, `normalize_raw` executes `raw.clamp(0.0, 1.0)`, truncating any score above 1.0 to exactly 1.0. This severely distorts candidate scores.
 
-## 根因
+## Root cause
 
-`normalize_raw` 在 `spec` 为 `None` 的分支假设 raw score 已在 0-1 范围内，但实际有 Judge 返回百分制分数。缺少从 0-100 到 0-1 的归一化。
+The `spec = None` branch of `normalize_raw` assumes the raw score is already in the 0–1 range. In practice, some judges return percentage-scale scores. The missing step is normalization from 0–100 to 0–1.
 
-## 环境
+## Environment
 
 - a3s-bench v0.1.2
-- 无 rescale spec 的任务 + 返回百分制分数的 Judge
+- Tasks without a rescale spec + judges returning percentage-scale scores

@@ -7,6 +7,9 @@ shift 2>/dev/null || true
 cd "$(dirname "$0")"
 PROJECT_DIR="$PWD"
 
+# 确保 a3s bench 使用本项目的编译产物，而不是 PATH 上可能过期的版本
+export A3S_BENCH_INSTALL_DIR="$PROJECT_DIR/target/debug"
+
 export PATH="$HOME/.cargo/bin:$PATH"
 
 echo ""

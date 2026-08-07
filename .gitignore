@@ -19,3 +19,4 @@
 *.tmp
 .a3s/config.acl
 benchmark_results_20260720_115349/run_ids.txt
+.test-tmp/

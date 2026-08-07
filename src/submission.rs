@@ -52,6 +52,10 @@ fn collect_terminal_files(
             let entry = entry?;
             let kind = entry.file_type()?;
             if kind.is_symlink() {
+                eprintln!(
+                    "warning: terminal workspace contains a symlink, skipping: {}",
+                    entry.path().display()
+                );
                 continue;
             }
             let relative = entry.path().strip_prefix(root)?.to_path_buf();

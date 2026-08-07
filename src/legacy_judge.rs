@@ -478,6 +478,7 @@ mod tests {
             platform: None,
             game_server_command: None,
             requires_model_gateway: false,
+            score_direction: "maximize".into(),
             timeout_sec: 60,
         }
     }

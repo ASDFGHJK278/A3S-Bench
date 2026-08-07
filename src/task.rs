@@ -88,6 +88,14 @@ pub fn load_local(reference: &Path) -> Result<TaskInfo> {
     let judge_asset = require_string(judge, "asset", None)?.to_owned();
     let candidate_timeout_sec =
         optional_positive_integer(judge, "solution_timeout_sec")?.unwrap_or(300);
+    // Test/debug override: allow a shorter candidate timeout via env var so
+    // that a3s-bench can produce a proper timed_out result instead of being
+    // killed by an external `timeout` command.
+    let candidate_timeout_sec = std::env::var("A3S_CANDIDATE_TIMEOUT_OVERRIDE")
+        .ok()
+        .and_then(|v| v.parse::<u64>().ok())
+        .filter(|v| *v > 0)
+        .unwrap_or(candidate_timeout_sec);
     let work = unique_block(block, "work")?;
     let work_network_need = work
         .attributes

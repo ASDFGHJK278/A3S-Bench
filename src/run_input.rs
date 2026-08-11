@@ -27,6 +27,18 @@ pub struct LoadedRun {
 }
 
 impl RunOptions {
+    pub fn locked(task_lock: &Path, candidate_lock: &Path) -> Self {
+        Self {
+            task: task_lock.to_string_lossy().into_owned(),
+            agent: candidate_lock.to_string_lossy().into_owned(),
+            model: None,
+            json: false,
+            locked: true,
+            codex_model: None,
+            codex_reasoning_effort: None,
+        }
+    }
+
     pub fn parse(args: &[String]) -> Result<Self> {
         anyhow::ensure!(!args.is_empty(), "run requires one Task reference");
         let mut agent = None;

@@ -7,7 +7,7 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{Duration, Instant};
 
 use crate::runtime_selection::{
-    RuntimeSelection, A3S_BOX_PROVIDER, DOCKER_PROVIDER, HOST_PROVIDER,
+    RuntimeSelection, A3S_BOX_PROVIDER, DOCKER_PROVIDER,
 };
 
 const IMAGE_PULL_ATTEMPTS: u32 = 3;
@@ -530,7 +530,6 @@ pub fn preflight(selection: &RuntimeSelection) -> Result<RuntimeStatus> {
     match selection.provider.as_str() {
         DOCKER_PROVIDER => docker_preflight(),
         A3S_BOX_PROVIDER => command_preflight("a3s-box", &["--version"], "a3s-box"),
-        HOST_PROVIDER => host_preflight(),
         crate::os_runtime::PROVIDER => crate::os_runtime::preflight(),
         provider => Err(anyhow::anyhow!(
             "configured Runtime provider {provider:?} is not installed; provider selection never falls back to Docker"
@@ -544,22 +543,6 @@ fn docker_preflight() -> Result<RuntimeStatus> {
         &["version", "--format", "{{.Server.Version}}"],
         "docker",
     )
-}
-
-fn host_preflight() -> Result<RuntimeStatus> {
-    // The host runtime runs candidate entrypoints directly on the host.
-    // Judges still run in Docker. Only /bin/sh is required.
-    anyhow::ensure!(
-        cfg!(unix),
-        "host Runtime provider is only supported on Unix-like systems"
-    );
-    let sh = std::path::Path::new("/bin/sh");
-    anyhow::ensure!(sh.is_file(), "host Runtime provider requires /bin/sh");
-    Ok(RuntimeStatus {
-        provider: HOST_PROVIDER.to_owned(),
-        ready: true,
-        detail: "host candidate runtime".to_owned(),
-    })
 }
 
 fn command_preflight(command: &str, args: &[&str], provider: &str) -> Result<RuntimeStatus> {

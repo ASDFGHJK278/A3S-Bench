@@ -2,13 +2,13 @@ version = "a3s.asset.v1"
 category = "agent"
 kind = "tool"
 name = "codex"
-description = "OpenAI Codex CLI adapter for host-runtime benchmark execution."
+description = "Native OpenAI Codex CLI Candidate adapter."
 service = "Coding Agent"
 created_by = "a3s-bench"
 
 source {
-  package_path   = "."
-  entrypoint     = "run.sh"
+  package_path = "."
+  entrypoint = "run.sh"
   definition_path = "prompts/controller.md"
 }
 
@@ -17,9 +17,9 @@ metadata {
 }
 
 runtime {
-  kind          = "tool"
-  isolation     = "host"
-  runtime_kind  = "codex-cli"
-  protocol      = "agent-tool"
-  agent_kind    = "coding-agent"
+  kind = "tool"
+  isolation = "serving"
+  runtime_kind = "codex-cli"
+  protocol = "codex-exec"
+  agent_kind = "coding-agent"
 }

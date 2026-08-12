@@ -28,6 +28,9 @@ pub fn resolve(reference: &str, state_root: &Path) -> Result<LocalAssetPackage> 
     if reference == "a3s-code" {
         return load_local(&crate::catalog::builtin_root().join("candidates/a3s-code"));
     }
+    if reference == "codex" {
+        return load_local(&crate::catalog::builtin_root().join("candidates/codex"));
+    }
     if reference.starts_with("./") || reference.starts_with("../") {
         return load_local(Path::new(reference));
     }

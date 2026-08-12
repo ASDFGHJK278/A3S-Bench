@@ -105,6 +105,11 @@ fn execute_inner(
         crate::os_runtime::PROVIDER => {
             validate_os_runtime_task(&loaded.task, loaded.model.as_deref())?
         }
+        crate::runtime_selection::HOST_PROVIDER => {
+            // Candidate runs on host, but judge still runs in Docker,
+            // so task images must be resolved.
+            resolve_task_images(&mut loaded.task, &loaded.resolved_images)?
+        }
         provider => anyhow::bail!(
             "execution through configured Runtime {provider:?} is not implemented yet"
         ),
@@ -129,6 +134,8 @@ fn execute_inner(
         &runtime_execution,
         &journal.run_id,
         state_root,
+        loaded.codex_model.as_deref(),
+        loaded.codex_reasoning_effort.as_deref(),
     )?;
     journal.advance(RunStage::CandidateCompleted)?;
     let submission = workspace::create_submission(&loaded.task, &candidate_workspace)?;
@@ -232,12 +239,19 @@ fn execute_candidate(
     runtime_execution: &RuntimeExecution<'_>,
     run_id: &str,
     state_root: &Path,
+    codex_model: Option<&str>,
+    codex_reasoning_effort: Option<&str>,
 ) -> Result<CandidateRun> {
     let Some(model) = model else {
-        anyhow::ensure!(
-            game.is_none(),
-            "interactive game Tasks require a model-backed Candidate"
-        );
+        // Game tasks with Docker or os-runtime still need a model-backed Candidate.
+        // The host runtime can run executable Candidates for game tasks because
+        // the host Candidate has full network access to the published game port.
+        if runtime_execution.provider != crate::runtime_selection::HOST_PROVIDER {
+            anyhow::ensure!(
+                game.is_none(),
+                "interactive game Tasks require a model-backed Candidate"
+            );
+        }
         let execution = match runtime_execution.provider {
             "docker" => {
                 match runtime::execute_docker_candidate(task, candidate, candidate_workspace)? {
@@ -258,6 +272,25 @@ fn execute_candidate(
                 runtime_execution.resolved_images,
             )
             .map(|()| crate::result_record::CandidateExecution::completed())?,
+            crate::runtime_selection::HOST_PROVIDER => {
+                match runtime::execute_host_candidate(
+                    task,
+                    candidate,
+                    candidate_workspace,
+                    game.and_then(|session| session.host_url()).as_deref(),
+                    codex_model,
+                    codex_reasoning_effort,
+                )? {
+                    runtime::CandidateProcessOutcome::Completed => {
+                        crate::result_record::CandidateExecution::completed()
+                    }
+                    runtime::CandidateProcessOutcome::TimedOut => {
+                        crate::result_record::CandidateExecution::timed_out(
+                            task.candidate_timeout_sec,
+                        )
+                    }
+                }
+            }
             provider => anyhow::bail!("Candidate Runtime {provider:?} is not implemented"),
         };
         return Ok(CandidateRun {
@@ -336,7 +369,9 @@ fn execute_judge(
         legacy_judge::execute(task, source, submission, model)
     } else {
         match runtime_provider {
-            "docker" => runtime::execute_docker_judge(task, judge, submission),
+            "docker" | crate::runtime_selection::HOST_PROVIDER => {
+                runtime::execute_docker_judge(task, judge, submission)
+            }
             crate::os_runtime::PROVIDER => {
                 crate::os_runtime::execute_judge(task, judge, submission, resolved_images)
             }

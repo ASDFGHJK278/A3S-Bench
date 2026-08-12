@@ -13,6 +13,7 @@ static GAME_SESSION_SEQUENCE: AtomicU64 = AtomicU64::new(0);
 pub struct GameSession {
     network: String,
     container: String,
+    host_port: Option<u16>,
 }
 
 impl GameSession {
@@ -26,8 +27,15 @@ impl GameSession {
         let suffix = format!("{}-{}-{sequence}", std::process::id(), epoch_millis()?);
         let network = format!("a3s-bench-{suffix}");
         let container = format!("a3s-bench-game-{suffix}");
-        docker(&["network", "create", "--internal", &network])?;
-        let session = Self { network, container };
+        // Regular network (not --internal) so published ports are accessible from the host
+        // for host-runtime Candidates. The game server does not need internet access.
+        docker(&["network", "create", &network])?;
+        let host_port = free_port()?;
+        let session = Self {
+            network,
+            container,
+            host_port: Some(host_port),
+        };
 
         let asset_root = state_root.join("runtime-assets");
         std::fs::create_dir_all(&asset_root)?;
@@ -49,6 +57,8 @@ impl GameSession {
             .args([
                 "--name",
                 &session.container,
+                "--publish",
+                &format!("{host_port}:8000"),
                 "--network",
                 &session.network,
                 "--read-only",
@@ -83,6 +93,11 @@ impl GameSession {
 
     pub fn url(&self) -> String {
         format!("http://{}:8000", self.container)
+    }
+
+    pub fn host_url(&self) -> Option<String> {
+        self.host_port
+            .map(|port| format!("http://127.0.0.1:{port}"))
     }
 
     pub fn finish(&self, task: &TaskInfo, source: &LegacyJudgeSource) -> Result<JudgeResult> {
@@ -161,6 +176,14 @@ impl Drop for GameSession {
         let _ = docker(&["rm", "-f", &self.container]);
         let _ = docker(&["network", "rm", &self.network]);
     }
+}
+
+fn free_port() -> Result<u16> {
+    use std::net::TcpListener;
+    let listener = TcpListener::bind("127.0.0.1:0")?;
+    let port = listener.local_addr()?.port();
+    drop(listener);
+    Ok(port)
 }
 
 fn docker(args: &[&str]) -> Result<String> {

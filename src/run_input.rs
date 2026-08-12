@@ -7,6 +7,8 @@ pub struct RunOptions {
     pub task: String,
     pub agent: String,
     pub model: Option<String>,
+    pub codex_model: Option<String>,
+    pub codex_reasoning_effort: Option<String>,
     pub json: bool,
     locked: bool,
 }
@@ -17,6 +19,8 @@ pub struct LoadedRun {
     pub judge: asset::LocalAssetPackage,
     pub judge_model: Option<String>,
     pub model: Option<String>,
+    pub codex_model: Option<String>,
+    pub codex_reasoning_effort: Option<String>,
     pub resolved_images: BTreeMap<String, String>,
     pub task_lock_digest: String,
     pub candidate_lock_digest: String,
@@ -27,6 +31,8 @@ impl RunOptions {
         anyhow::ensure!(!args.is_empty(), "run requires one Task reference");
         let mut agent = None;
         let mut model = None;
+        let mut codex_model = None;
+        let mut codex_reasoning_effort = None;
         let mut json = false;
         let mut locked = false;
         let mut index = 1;
@@ -38,6 +44,16 @@ impl RunOptions {
                 }
                 "--model" if model.is_none() && index + 1 < args.len() => {
                     model = Some(args[index + 1].clone());
+                    index += 2;
+                }
+                "--codex-model" if codex_model.is_none() && index + 1 < args.len() => {
+                    codex_model = Some(args[index + 1].clone());
+                    index += 2;
+                }
+                "--codex-reasoning-effort"
+                    if codex_reasoning_effort.is_none() && index + 1 < args.len() =>
+                {
+                    codex_reasoning_effort = Some(args[index + 1].clone());
                     index += 2;
                 }
                 "--json" if !json => {
@@ -55,6 +71,8 @@ impl RunOptions {
             task: args[0].clone(),
             agent: agent.ok_or_else(|| anyhow::anyhow!("run requires exactly one --agent"))?,
             model,
+            codex_model,
+            codex_reasoning_effort,
             json,
             locked,
         })
@@ -67,12 +85,20 @@ impl RunOptions {
         judge_model: Option<String>,
         runtime_provider: &str,
     ) -> Result<LoadedRun> {
+        let codex_model = self.codex_model.clone();
+        let codex_reasoning_effort = self.codex_reasoning_effort.clone();
         if self.locked {
             anyhow::ensure!(
                 self.model.is_none(),
                 "--model cannot alter a locked Candidate"
             );
-            return load_locks(Path::new(&self.task), Path::new(&self.agent), state_root);
+            return load_locks(
+                Path::new(&self.task),
+                Path::new(&self.agent),
+                state_root,
+                codex_model,
+                codex_reasoning_effort,
+            );
         }
         let task_source = crate::catalog::resolve_task_reference(&self.task)?;
         let locks = state_root.join("locks");
@@ -87,11 +113,23 @@ impl RunOptions {
             runtime_provider,
         )?;
         lock::create_candidate(&self.agent, self.model.clone(), state_root, &candidate_lock)?;
-        load_locks(&task_lock, &candidate_lock, state_root)
+        load_locks(
+            &task_lock,
+            &candidate_lock,
+            state_root,
+            codex_model,
+            codex_reasoning_effort,
+        )
     }
 }
 
-fn load_locks(task_lock: &Path, candidate_lock: &Path, state_root: &Path) -> Result<LoadedRun> {
+fn load_locks(
+    task_lock: &Path,
+    candidate_lock: &Path,
+    state_root: &Path,
+    codex_model: Option<String>,
+    codex_reasoning_effort: Option<String>,
+) -> Result<LoadedRun> {
     let locked_task = lock::load_task(task_lock, state_root)?;
     let (candidate_lock, candidate_artifact) = lock::load_candidate(candidate_lock, state_root)?;
     Ok(LoadedRun {
@@ -100,6 +138,8 @@ fn load_locks(task_lock: &Path, candidate_lock: &Path, state_root: &Path) -> Res
         judge: asset::load_local(&locked_task.judge_artifact)?,
         judge_model: locked_task.lock.judge_model.clone(),
         model: candidate_lock.model,
+        codex_model,
+        codex_reasoning_effort,
         resolved_images: locked_task.lock.resolved_images,
         task_lock_digest: locked_task.lock.lock_digest,
         candidate_lock_digest: candidate_lock.lock_digest,

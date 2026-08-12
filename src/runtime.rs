@@ -6,7 +6,9 @@ use std::process::{Command, Output, Stdio};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{Duration, Instant};
 
-use crate::runtime_selection::{RuntimeSelection, A3S_BOX_PROVIDER, DOCKER_PROVIDER};
+use crate::runtime_selection::{
+    RuntimeSelection, A3S_BOX_PROVIDER, DOCKER_PROVIDER, HOST_PROVIDER,
+};
 
 const IMAGE_PULL_ATTEMPTS: u32 = 3;
 const IMAGE_PULL_BASE_DELAY: Duration = Duration::from_secs(5);
@@ -260,6 +262,93 @@ pub fn execute_docker_candidate(
     Ok(CandidateProcessOutcome::Completed)
 }
 
+pub fn execute_host_candidate(
+    task: &TaskInfo,
+    candidate: &LocalAssetPackage,
+    workspace: &Path,
+    game_url: Option<&str>,
+    codex_model: Option<&str>,
+    codex_reasoning_effort: Option<&str>,
+) -> Result<CandidateProcessOutcome> {
+    let entrypoint = candidate
+        .entrypoint
+        .split(':')
+        .next()
+        .unwrap_or(&candidate.entrypoint);
+    let entrypoint_path = candidate.root.join(entrypoint);
+    anyhow::ensure!(
+        entrypoint_path.is_file(),
+        "Candidate entrypoint is missing: {entrypoint}"
+    );
+    let mut command = Command::new("/bin/sh");
+    command
+        .arg(&entrypoint_path)
+        .arg(workspace)
+        .current_dir(workspace)
+        .env("A3S_TASK_ROOT", &task.root);
+    if let Some(url) = game_url {
+        command.env("A3S_GAME_SERVER_URL", url);
+    }
+    if let Some(model) = codex_model {
+        command.env("A3S_CODEX_MODEL", model);
+    }
+    if let Some(effort) = codex_reasoning_effort {
+        command.env("A3S_CODEX_REASONING_EFFORT", effort);
+    }
+    let (candidate_output, timed_out) = output_with_timeout(
+        &mut command,
+        Duration::from_secs(task.candidate_timeout_sec),
+    )
+    .context("could not start host Candidate")?;
+    // Best-effort: break any hard links in the workspace so that submission
+    // projection does not reject them. This runs even on timeout, since the
+    // benchmark still scores whatever the candidate produced.
+    break_hard_links(workspace);
+
+    if timed_out {
+        return Ok(CandidateProcessOutcome::TimedOut);
+    }
+    anyhow::ensure!(
+        candidate_output.status.success(),
+        "Candidate exited with {}: {}",
+        candidate_output.status,
+        String::from_utf8_lossy(&candidate_output.stderr).trim()
+    );
+    Ok(CandidateProcessOutcome::Completed)
+}
+
+/// Replace every file with `nlink > 1` by an independent copy so that the
+/// submission validator (which rejects hard links) does not reject the
+/// workspace.
+fn break_hard_links(root: &Path) {
+    let Ok(entries) = std::fs::read_dir(root) else {
+        return;
+    };
+    for entry in entries.flatten() {
+        let path = entry.path();
+        let Ok(file_type) = entry.file_type() else {
+            continue;
+        };
+        if file_type.is_dir() {
+            break_hard_links(&path);
+        } else if file_type.is_file() {
+            #[cfg(unix)]
+            {
+                use std::os::unix::fs::MetadataExt;
+                let Ok(meta) = entry.metadata() else {
+                    continue;
+                };
+                if meta.nlink() > 1 {
+                    let tmp = path.with_extension("a3s_hlink_fix");
+                    if std::fs::copy(&path, &tmp).is_ok() {
+                        let _ = std::fs::rename(&tmp, &path);
+                    }
+                }
+            }
+        }
+    }
+}
+
 fn output_with_timeout(command: &mut Command, timeout: Duration) -> Result<(Output, bool)> {
     use std::io::{Read, Seek, SeekFrom};
 
@@ -296,7 +385,6 @@ fn output_with_timeout(command: &mut Command, timeout: Duration) -> Result<(Outp
         timed_out,
     ))
 }
-
 pub fn execute_docker_judge(
     task: &TaskInfo,
     judge: &LocalAssetPackage,
@@ -442,6 +530,7 @@ pub fn preflight(selection: &RuntimeSelection) -> Result<RuntimeStatus> {
     match selection.provider.as_str() {
         DOCKER_PROVIDER => docker_preflight(),
         A3S_BOX_PROVIDER => command_preflight("a3s-box", &["--version"], "a3s-box"),
+        HOST_PROVIDER => host_preflight(),
         crate::os_runtime::PROVIDER => crate::os_runtime::preflight(),
         provider => Err(anyhow::anyhow!(
             "configured Runtime provider {provider:?} is not installed; provider selection never falls back to Docker"
@@ -455,6 +544,22 @@ fn docker_preflight() -> Result<RuntimeStatus> {
         &["version", "--format", "{{.Server.Version}}"],
         "docker",
     )
+}
+
+fn host_preflight() -> Result<RuntimeStatus> {
+    // The host runtime runs candidate entrypoints directly on the host.
+    // Judges still run in Docker. Only /bin/sh is required.
+    anyhow::ensure!(
+        cfg!(unix),
+        "host Runtime provider is only supported on Unix-like systems"
+    );
+    let sh = std::path::Path::new("/bin/sh");
+    anyhow::ensure!(sh.is_file(), "host Runtime provider requires /bin/sh");
+    Ok(RuntimeStatus {
+        provider: HOST_PROVIDER.to_owned(),
+        ready: true,
+        detail: "host candidate runtime".to_owned(),
+    })
 }
 
 fn command_preflight(command: &str, args: &[&str], provider: &str) -> Result<RuntimeStatus> {

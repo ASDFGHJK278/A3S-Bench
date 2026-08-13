@@ -54,6 +54,7 @@ impl GameSession {
         }
         let output = process
             .args(crate::runtime_profile::JUDGE_DOCKER_LIMITS)
+            .args(crate::runtime_profile::READ_ONLY_JUDGE_TMPFS)
             .args([
                 "--name",
                 &session.container,

@@ -247,10 +247,10 @@ impl LocalResultRecord {
                     "completed model Candidate has no usage"
                 );
             }
-        } else {
+        } else if candidate_timed_out {
             anyhow::ensure!(
                 self.model_usage.is_none(),
-                "model usage exists without a model"
+                "timed-out Candidate has completed usage"
             );
         }
         if let Some(usage) = &self.model_usage {
@@ -391,6 +391,41 @@ mod tests {
         );
 
         record.candidate_execution = Some(CandidateExecution::timed_out(0));
+        record.result_digest = crate::result_identity::calculate(&record).unwrap();
+        assert!(record.validate("local-1").is_err());
+    }
+
+    #[test]
+    fn completed_product_candidate_accepts_usage_without_explicit_model() {
+        let mut record = LocalResultRecord {
+            schema: "a3s.bench.local-result.v5".into(),
+            result_digest: String::new(),
+            governance_status: "local_unofficial".into(),
+            run_id: "local-1".into(),
+            task_id: "task".into(),
+            task_lock_digest: format!("sha256:{}", "a".repeat(64)),
+            agent: "codex".into(),
+            candidate_lock_digest: format!("sha256:{}", "b".repeat(64)),
+            agent_identity: "codex-cli 0.147.0".into(),
+            judge_identity: "judge-id".into(),
+            runtime_provider: "docker".into(),
+            model: None,
+            candidate_execution: Some(CandidateExecution::completed()),
+            model_usage: Some(ModelExecution {
+                prompt_tokens: 12,
+                completion_tokens: 5,
+                total_tokens: 17,
+                cache_read_tokens: Some(3),
+                cache_write_tokens: None,
+                tool_calls_count: 1,
+            }),
+            primary_metric: "score".into(),
+            score: "1".into(),
+            judge_result: judge(),
+        };
+        record.result_digest = crate::result_identity::calculate(&record).unwrap();
+        record.validate("local-1").unwrap();
+        record.candidate_execution = Some(CandidateExecution::timed_out(300));
         record.result_digest = crate::result_identity::calculate(&record).unwrap();
         assert!(record.validate("local-1").is_err());
     }

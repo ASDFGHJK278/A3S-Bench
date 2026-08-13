@@ -241,6 +241,8 @@ fn execute_candidate(
         );
         let prompt = std::fs::read_to_string(task.root.join("public/prompt.md"))?;
         let instructions = std::fs::read_to_string(candidate.model_instructions_path()?)?;
+        let log_dir = state_root.join("runs").join(run_id);
+        std::fs::create_dir_all(&log_dir)?;
         return Ok(
             match crate::codex_candidate::execute(
                 candidate_workspace,
@@ -249,6 +251,7 @@ fn execute_candidate(
                 model,
                 task.work_network_need == "public_internet",
                 task.candidate_timeout_sec,
+                Some(&log_dir.join("codex-events.jsonl")),
             )? {
                 crate::codex_candidate::CodexOutcome::Completed(model_usage) => CandidateRun {
                     execution: crate::result_record::CandidateExecution::completed(),

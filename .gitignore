@@ -12,3 +12,9 @@
 *.swp
 *.swo
 *~
+
+# Local development and benchmark output
+/.a3s/config.acl
+/.a3s/memory/items/
+/.test-tmp/
+/benchmark-*.log

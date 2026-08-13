@@ -33,6 +33,7 @@ pub fn execute(
     model: Option<&str>,
     public_internet: bool,
     timeout_sec: u64,
+    event_log: Option<&Path>,
 ) -> Result<CodexOutcome> {
     let prompt = format!(
         "{instructions}\n\n# Benchmark task\n\n{task_prompt}\n\nWork only in the supplied workspace and complete the task."
@@ -66,6 +67,7 @@ pub fn execute(
     let mut stdout = tempfile::tempfile()?;
     let mut stderr = tempfile::tempfile()?;
     let mut child = command
+        .stdin(Stdio::null())
         .stdout(Stdio::from(stdout.try_clone()?))
         .stderr(Stdio::from(stderr.try_clone()?))
         .spawn()
@@ -79,20 +81,33 @@ pub fn execute(
             let mut diagnostics = String::new();
             stdout.read_to_string(&mut events)?;
             stderr.read_to_string(&mut diagnostics)?;
-            anyhow::ensure!(
-                status.success(),
-                "Codex Candidate exited with {status}: {}",
-                diagnostics.trim()
-            );
+            persist_events(event_log, &events)?;
+            if !status.success() {
+                anyhow::bail!(
+                    "Codex Candidate exited with {status}: {}",
+                    failure_diagnostics(&events, &diagnostics)
+                );
+            }
             return Ok(CodexOutcome::Completed(parse_usage(&events)?));
         }
         if Instant::now() >= deadline {
             child.kill()?;
             child.wait()?;
+            stdout.seek(SeekFrom::Start(0))?;
+            let mut events = String::new();
+            stdout.read_to_string(&mut events)?;
+            persist_events(event_log, &events)?;
             return Ok(CodexOutcome::TimedOut);
         }
         std::thread::sleep(Duration::from_millis(50));
     }
+}
+
+fn persist_events(path: Option<&Path>, events: &str) -> Result<()> {
+    if let Some(path) = path {
+        crate::state_fs::secure_atomic_write(path, events.as_bytes())?;
+    }
+    Ok(())
 }
 
 fn command() -> Command {
@@ -103,6 +118,26 @@ fn command() -> Command {
     return Command::new("codex.cmd");
     #[cfg(not(windows))]
     Command::new("codex")
+}
+
+fn failure_diagnostics(events: &str, stderr: &str) -> String {
+    let structured = events
+        .lines()
+        .filter_map(|line| serde_json::from_str::<Value>(line).ok())
+        .filter_map(|event| {
+            event
+                .pointer("/error/message")
+                .or_else(|| event.get("message"))
+                .and_then(Value::as_str)
+                .map(str::to_owned)
+        })
+        .next_back();
+    match (structured, stderr.trim()) {
+        (Some(message), "") => message,
+        (Some(message), stderr) => format!("{message}; stderr: {stderr}"),
+        (None, "") => "Codex emitted no diagnostics".to_string(),
+        (None, stderr) => stderr.to_string(),
+    }
 }
 
 fn parse_usage(events: &str) -> Result<Option<ModelExecution>> {
@@ -155,6 +190,19 @@ fn optional_usize_field(value: &Value, name: &str) -> Result<Option<usize>> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn extracts_structured_failure_before_stderr() {
+        let events = concat!(
+            r#"{"type":"error","message":"request failed"}"#,
+            "\n",
+            r#"{"type":"turn.failed","error":{"message":"model is unavailable"}}"#
+        );
+        assert_eq!(
+            failure_diagnostics(events, "Reading additional input from stdin..."),
+            "model is unavailable; stderr: Reading additional input from stdin..."
+        );
+    }
 
     #[test]
     fn parses_final_usage_and_counts_commands() {

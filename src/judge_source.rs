@@ -10,6 +10,8 @@ pub struct LegacyJudgeSource {
     pub parser: String,
     pub workspace_source_path: String,
     pub rescale: Option<serde_json::Value>,
+    pub selection_hint: String,
+    pub score_direction: String,
     pub platform: Option<String>,
     pub game_server_command: Option<String>,
     pub requires_model_gateway: bool,
@@ -128,6 +130,8 @@ pub fn load(path: &Path) -> Result<Option<LegacyJudgeSource>> {
             .rescale_hint
             .map(serde_json::to_value)
             .transpose()?,
+        selection_hint: descriptor.source_result.selection_hint,
+        score_direction: descriptor.source_result.score_direction,
         platform: descriptor.image.platform,
         game_server_command: descriptor
             .evaluation

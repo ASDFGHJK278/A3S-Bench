@@ -220,7 +220,28 @@ fn parse_score(source: &LegacyJudgeSource, output: &str) -> Result<f64> {
                 .unwrap_or(0.0);
             normalize_raw(source.rescale.as_ref(), raw)
         }
-        "pytest_v" => pytest_ratio(output),
+        "pytest_v" => {
+            // EdgeBench's pytest_v parser extracts test pass/fail details
+            // and computes pass_rate, but the *score* comes from
+            // TOTAL_SCORE (extracted independently).  The final metric
+            // depends on the selection policy:
+            //   - score_first:      use the rescaled TOTAL_SCORE
+            //   - pass_rate_first:  use pass_rate unless 100%, then score
+            let pass_rate = pytest_ratio(output)?;
+            let raw_score = extract_total_score(output);
+            let rescaled = normalize_raw(source.rescale.as_ref(), raw_score)?;
+            Ok(match source.selection_hint.as_str() {
+                "score_first" => rescaled,
+                "pass_rate_first" => {
+                    if pass_rate >= 1.0 {
+                        rescaled
+                    } else {
+                        pass_rate
+                    }
+                }
+                _ => pass_rate,
+            })
+        }
         value => anyhow::bail!("unsupported legacy Judge parser {value:?}"),
     }
 }
@@ -293,6 +314,15 @@ fn pytest_ratio(output: &str) -> Result<f64> {
     } else {
         passed as f64 / total as f64
     })
+}
+
+fn extract_total_score(output: &str) -> f64 {
+    let re =
+        Regex::new(r"TOTAL_SCORE\s+(?:inf|([0-9]+(?:\.[0-9]+)?(?:[eE][+-]?[0-9]+)?))").unwrap();
+    re.captures(output)
+        .and_then(|c| c.get(1))
+        .and_then(|m| m.as_str().parse::<f64>().ok())
+        .unwrap_or(0.0)
 }
 
 pub(crate) fn normalize_raw(spec: Option<&Value>, raw: f64) -> Result<f64> {
@@ -494,6 +524,25 @@ mod tests {
             parser: "structured_json".into(),
             workspace_source_path: "/workspace".into(),
             rescale: None,
+            selection_hint: "score_first".into(),
+            score_direction: "maximize".into(),
+            platform: None,
+            game_server_command: None,
+            requires_model_gateway: false,
+            timeout_sec: 60,
+        }
+    }
+
+    fn pytest_v_source(selection: &str, rescale: Option<Value>) -> LegacyJudgeSource {
+        LegacyJudgeSource {
+            image: "judge:latest".into(),
+            command: "judge".into(),
+            mode: "batch".into(),
+            parser: "pytest_v".into(),
+            workspace_source_path: "/workspace".into(),
+            rescale,
+            selection_hint: selection.into(),
+            score_direction: "maximize".into(),
             platform: None,
             game_server_command: None,
             requires_model_gateway: false,
@@ -555,6 +604,57 @@ mod tests {
         assert!(arguments
             .windows(2)
             .any(|pair| pair == ["--security-opt", "no-new-privileges"]));
+    }
+
+    #[test]
+    fn pytest_v_score_first_uses_rescaled_total_score() {
+        // ffmpeg_swscale: log_anchor, anchor_raw=14.155, anchor_score=43.0
+        let rescale =
+            serde_json::json!({"kind":"log_anchor","anchor_raw":14.155,"anchor_score":43.0});
+        let source = pytest_v_source("score_first", Some(rescale));
+        let output = "=== 1 passed, 0 failed in 0.00s ===\nTOTAL_SCORE 14.155\n";
+        let score = parse_score(&source, output).unwrap();
+        // log_anchor: 43 * ln(14.155) / ln(14.155) = 43, then /100 = 0.43
+        assert!((score - 0.43).abs() < 0.001);
+    }
+
+    #[test]
+    fn pytest_v_score_first_with_zero_total_score() {
+        let rescale =
+            serde_json::json!({"kind":"log_anchor","anchor_raw":14.155,"anchor_score":43.0});
+        let source = pytest_v_source("score_first", Some(rescale));
+        let output = "=== 0 passed, 1 failed in 0.00s ===\nTOTAL_SCORE 0.0\n";
+        let score = parse_score(&source, output).unwrap();
+        assert_eq!(score, 0.0);
+    }
+
+    #[test]
+    fn pytest_v_pass_rate_first_uses_pass_rate_below_100() {
+        let rescale = serde_json::json!({"kind":"linear","lower":0.0,"upper":100.0});
+        let source = pytest_v_source("pass_rate_first", Some(rescale));
+        let output = "=== 2 passed, 1 failed in 0.00s ===\nTOTAL_SCORE 50.0\n";
+        let score = parse_score(&source, output).unwrap();
+        // pass_rate = 2/3 < 1.0, so use pass_rate
+        assert!((score - 2.0 / 3.0).abs() < 0.001);
+    }
+
+    #[test]
+    fn pytest_v_pass_rate_first_uses_score_at_100_percent() {
+        let rescale = serde_json::json!({"kind":"linear","lower":0.0,"upper":100.0});
+        let source = pytest_v_source("pass_rate_first", Some(rescale));
+        let output = "=== 1 passed, 0 failed in 0.00s ===\nTOTAL_SCORE 50.0\n";
+        let score = parse_score(&source, output).unwrap();
+        // pass_rate = 1.0, so use rescaled score: linear(50, 0, 100) = 50/100 = 0.5
+        assert!((score - 0.5).abs() < 0.001);
+    }
+
+    #[test]
+    fn pytest_v_score_first_without_rescale_uses_total_score_divided_by_100() {
+        let source = pytest_v_source("score_first", None);
+        let output = "=== 1 passed, 0 failed in 0.00s ===\nTOTAL_SCORE 42.0\n";
+        let score = parse_score(&source, output).unwrap();
+        // No rescale: clamp(42, 0, 100) / 100 = 0.42
+        assert!((score - 0.42).abs() < 0.001);
     }
 
     #[test]

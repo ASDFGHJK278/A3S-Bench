@@ -223,24 +223,18 @@ fn parse_score(source: &LegacyJudgeSource, output: &str) -> Result<f64> {
         "pytest_v" => {
             // EdgeBench's pytest_v parser extracts test pass/fail details
             // and computes pass_rate, but the *score* comes from
-            // TOTAL_SCORE (extracted independently).  The final metric
-            // depends on the selection policy:
-            //   - score_first:      use the rescaled TOTAL_SCORE
-            //   - pass_rate_first:  use pass_rate unless 100%, then score
+            // TOTAL_SCORE (extracted independently).  The final metric is
+            // always the rescaled TOTAL_SCORE when present, regardless of
+            // selection_hint.  When TOTAL_SCORE is absent, fall back to
+            // pass_rate.  This matches EdgeBench's grading flow where
+            // score_0_100 = rescale_score(rescale, TOTAL_SCORE) is the
+            // primary leaderboard metric, and selection_hint only governs
+            // multi-submission selection (irrelevant for A3S single-run).
             let pass_rate = pytest_ratio(output)?;
-            let raw_score = extract_total_score(output);
-            let rescaled = normalize_raw(source.rescale.as_ref(), raw_score)?;
-            Ok(match source.selection_hint.as_str() {
-                "score_first" => rescaled,
-                "pass_rate_first" => {
-                    if pass_rate >= 1.0 {
-                        rescaled
-                    } else {
-                        pass_rate
-                    }
-                }
-                _ => pass_rate,
-            })
+            match extract_total_score(output) {
+                Some(raw_score) => normalize_raw(source.rescale.as_ref(), raw_score),
+                None => Ok(pass_rate),
+            }
         }
         value => anyhow::bail!("unsupported legacy Judge parser {value:?}"),
     }
@@ -316,13 +310,12 @@ fn pytest_ratio(output: &str) -> Result<f64> {
     })
 }
 
-fn extract_total_score(output: &str) -> f64 {
+fn extract_total_score(output: &str) -> Option<f64> {
     let re =
         Regex::new(r"TOTAL_SCORE\s+(?:inf|([0-9]+(?:\.[0-9]+)?(?:[eE][+-]?[0-9]+)?))").unwrap();
     re.captures(output)
         .and_then(|c| c.get(1))
         .and_then(|m| m.as_str().parse::<f64>().ok())
-        .unwrap_or(0.0)
 }
 
 pub(crate) fn normalize_raw(spec: Option<&Value>, raw: f64) -> Result<f64> {
@@ -629,22 +622,35 @@ mod tests {
     }
 
     #[test]
-    fn pytest_v_pass_rate_first_uses_pass_rate_below_100() {
+    fn pytest_v_with_total_score_always_uses_rescaled_score() {
+        // Regardless of selection_hint, when TOTAL_SCORE is present,
+        // the rescaled TOTAL_SCORE is the final score (matching EdgeBench).
         let rescale = serde_json::json!({"kind":"linear","lower":0.0,"upper":100.0});
         let source = pytest_v_source("pass_rate_first", Some(rescale));
         let output = "=== 2 passed, 1 failed in 0.00s ===\nTOTAL_SCORE 50.0\n";
         let score = parse_score(&source, output).unwrap();
-        // pass_rate = 2/3 < 1.0, so use pass_rate
+        // TOTAL_SCORE=50, linear(50, 0, 100) = 50/100 = 0.5
+        assert!((score - 0.5).abs() < 0.001);
+    }
+
+    #[test]
+    fn pytest_v_without_total_score_falls_back_to_pass_rate() {
+        // When TOTAL_SCORE is absent, pass_rate is the score.
+        let rescale = serde_json::json!({"kind":"linear","lower":0.0,"upper":100.0});
+        let source = pytest_v_source("pass_rate_first", Some(rescale));
+        let output = "=== 2 passed, 1 failed in 0.00s ===\n";
+        let score = parse_score(&source, output).unwrap();
+        // No TOTAL_SCORE → pass_rate = 2/3
         assert!((score - 2.0 / 3.0).abs() < 0.001);
     }
 
     #[test]
-    fn pytest_v_pass_rate_first_uses_score_at_100_percent() {
+    fn pytest_v_pass_rate_first_with_total_score_uses_rescaled() {
         let rescale = serde_json::json!({"kind":"linear","lower":0.0,"upper":100.0});
         let source = pytest_v_source("pass_rate_first", Some(rescale));
         let output = "=== 1 passed, 0 failed in 0.00s ===\nTOTAL_SCORE 50.0\n";
         let score = parse_score(&source, output).unwrap();
-        // pass_rate = 1.0, so use rescaled score: linear(50, 0, 100) = 50/100 = 0.5
+        // TOTAL_SCORE=50, linear(50, 0, 100) = 50/100 = 0.5
         assert!((score - 0.5).abs() < 0.001);
     }
 

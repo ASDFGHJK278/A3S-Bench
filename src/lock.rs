@@ -152,10 +152,31 @@ pub fn create_candidate_with_options(
     state_root: &Path,
     output: &Path,
 ) -> Result<CandidateLock> {
+    create_candidate_with_codex_default(
+        reference,
+        model,
+        reasoning_effort,
+        None,
+        state_root,
+        output,
+    )
+}
+
+pub fn create_candidate_with_codex_default(
+    reference: &str,
+    model: Option<String>,
+    reasoning_effort: Option<String>,
+    codex_default_reasoning_effort: Option<String>,
+    state_root: &Path,
+    output: &Path,
+) -> Result<CandidateLock> {
     let asset = crate::asset::resolve(reference, state_root)?;
     let digest = crate::task_snapshot::capture(&asset.root, state_root)?;
     let captured = crate::task_snapshot::artifact_path(state_root, &digest)?;
     let locked_asset = crate::asset::load_local(&captured)?;
+    if let Some(effort) = codex_default_reasoning_effort.as_deref() {
+        validate_reasoning_effort(effort)?;
+    }
     if let Some(effort) = reasoning_effort.as_deref() {
         validate_reasoning_effort(effort)?;
         anyhow::ensure!(
@@ -163,6 +184,11 @@ pub fn create_candidate_with_options(
             "reasoning effort is supported only by the native Codex Candidate"
         );
     }
+    let reasoning_effort = if locked_asset.protocol == crate::asset::CandidateProtocol::CodexExec {
+        reasoning_effort.or(codex_default_reasoning_effort)
+    } else {
+        reasoning_effort
+    };
     if locked_asset.protocol == crate::asset::CandidateProtocol::CodexExec {
         if let Some(model) = model.as_deref() {
             validate_codex_model(model)?;

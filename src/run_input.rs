@@ -89,6 +89,7 @@ impl RunOptions {
         state_root: &Path,
         run_id: &str,
         judge_model: Option<String>,
+        codex_default_reasoning_effort: Option<String>,
         runtime_provider: &str,
     ) -> Result<LoadedRun> {
         if self.locked {
@@ -110,10 +111,11 @@ impl RunOptions {
             &task_lock,
             runtime_provider,
         )?;
-        lock::create_candidate_with_options(
+        lock::create_candidate_with_codex_default(
             &self.agent,
             self.model.clone(),
             self.reasoning_effort.clone(),
+            codex_default_reasoning_effort,
             state_root,
             &candidate_lock,
         )?;

@@ -30,7 +30,13 @@ fn parses_codex_reasoning_effort_and_rejects_locked_override() {
     locked_args.push("--locked".into());
     let locked = RunOptions::parse(&locked_args).unwrap();
     let error = locked
-        .load(Path::new("/tmp/does-not-exist"), "run", None, "docker")
+        .load(
+            Path::new("/tmp/does-not-exist"),
+            "run",
+            None,
+            Some("low".into()),
+            "docker",
+        )
         .err()
         .unwrap();
     assert!(error

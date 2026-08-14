@@ -117,6 +117,22 @@ a3s bench run ./task \
   --reasoning-effort none
 ```
 
+For compatibility with top-level `a3s` releases that do not yet forward the
+flag, configure the default in `.a3s/config.acl` and omit the command-line
+option:
+
+```acl
+bench {
+  codex_reasoning_effort = "none"
+}
+```
+
+For native Codex lock creation, an explicit command-line value wins over this
+default. The resolved value is written into CandidateLock v3 before execution.
+The default is Codex-only: it is ignored for `a3s-code` and other AgentTool
+Candidates. Locked execution never consults it, and suite Candidate blocks
+remain self-contained rather than inheriting ambient configuration.
+
 The Codex Candidate produces `a3s.bench.candidate-lock.v3`. Its `product`
 contains the Codex package name, version, target triple, and artifact-set
 digest; `lock_digest` binds those values with the Candidate revision, artifact,

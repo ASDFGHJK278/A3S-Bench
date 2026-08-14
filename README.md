@@ -222,6 +222,21 @@ a3s bench run quick_file_edit \
   --reasoning-effort none
 ```
 
+When the top-level `a3s` version does not forward `--reasoning-effort`, set a
+Codex-only default in the project-local or user-local `.a3s/config.acl`:
+
+```acl
+bench {
+  codex_reasoning_effort = "none"
+}
+```
+
+The default is used by `run` and `advanced candidate lock` only when they lock
+the native `codex` Candidate without an explicit reasoning effort. An explicit
+`--reasoning-effort` takes precedence. The setting is ignored for `a3s-code`,
+does not alter an existing CandidateLock, and is not implicitly applied to
+suite Candidate blocks, whose reasoning effort remains part of the suite spec.
+
 For `a3s-code`, credentials remain in `.a3s/config.acl`; locks and results
 record identity and usage, not provider secrets. The adapter uses A3S Code Core
 5.3.4 as a versioned controller, so varying the model compares models under

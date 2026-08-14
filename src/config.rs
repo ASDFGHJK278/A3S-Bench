@@ -10,6 +10,13 @@ pub struct LocalConfig {
     pub path: Option<PathBuf>,
     pub runtime: RuntimeSelection,
     pub judge_model: Option<String>,
+    pub codex_reasoning_effort: Option<String>,
+}
+
+#[derive(Default)]
+struct BenchConfig {
+    judge_model: Option<String>,
+    codex_reasoning_effort: Option<String>,
 }
 
 pub struct ModelRoute {
@@ -24,6 +31,7 @@ pub fn discover(start: &Path) -> Result<LocalConfig> {
         return Ok(LocalConfig {
             path: None,
             judge_model: None,
+            codex_reasoning_effort: None,
             runtime: RuntimeSelection::bench_default()?,
         });
     };
@@ -31,9 +39,11 @@ pub fn discover(start: &Path) -> Result<LocalConfig> {
         .with_context(|| format!("could not read {}", path.display()))?;
     let document = a3s_acl::parse(&source)
         .map_err(|error| anyhow::anyhow!("invalid {}: {error}", path.display()))?;
+    let bench = parse_bench(&document)?;
     Ok(LocalConfig {
         runtime: parse_runtime(&document)?,
-        judge_model: parse_judge_model(&document)?,
+        judge_model: bench.judge_model,
+        codex_reasoning_effort: bench.codex_reasoning_effort,
         path: Some(path),
     })
 }
@@ -93,7 +103,7 @@ pub fn resolve_model_route(path: &Path, reference: &str) -> Result<ModelRoute> {
     })
 }
 
-fn parse_judge_model(document: &Document) -> Result<Option<String>> {
+fn parse_bench(document: &Document) -> Result<BenchConfig> {
     let blocks: Vec<_> = document
         .blocks
         .iter()
@@ -104,21 +114,53 @@ fn parse_judge_model(document: &Document) -> Result<Option<String>> {
         "config.acl contains duplicate bench blocks"
     );
     let Some(block) = blocks.first() else {
-        return Ok(None);
+        return Ok(BenchConfig::default());
     };
     anyhow::ensure!(block.labels.is_empty(), "bench block must not have labels");
     anyhow::ensure!(
-        block.attributes.keys().all(|name| name == "judge_model") && block.blocks.is_empty(),
-        "bench block supports only judge_model"
+        block
+            .attributes
+            .keys()
+            .all(|name| name == "judge_model" || name == "codex_reasoning_effort")
+            && block.blocks.is_empty(),
+        "bench block supports only judge_model and codex_reasoning_effort"
     );
-    let model = block
+    let judge_model = block
         .attributes
         .get("judge_model")
-        .and_then(Value::as_str)
-        .filter(|value| !value.trim().is_empty())
-        .ok_or_else(|| anyhow::anyhow!("bench.judge_model must be a non-empty provider/model"))?;
-    parse_model_reference(model)?;
-    Ok(Some(model.to_owned()))
+        .map(|value| {
+            value
+                .as_str()
+                .filter(|value| !value.trim().is_empty())
+                .ok_or_else(|| {
+                    anyhow::anyhow!("bench.judge_model must be a non-empty provider/model")
+                })
+        })
+        .transpose()?;
+    if let Some(model) = judge_model {
+        parse_model_reference(model)?;
+    }
+    let codex_reasoning_effort = block
+        .attributes
+        .get("codex_reasoning_effort")
+        .map(|value| {
+            value
+                .as_str()
+                .filter(|value| !value.trim().is_empty())
+                .ok_or_else(|| {
+                    anyhow::anyhow!(
+                        "bench.codex_reasoning_effort must be a non-empty reasoning effort"
+                    )
+                })
+        })
+        .transpose()?;
+    if let Some(effort) = codex_reasoning_effort {
+        crate::lock::validate_reasoning_effort(effort)?;
+    }
+    Ok(BenchConfig {
+        judge_model: judge_model.map(str::to_owned),
+        codex_reasoning_effort: codex_reasoning_effort.map(str::to_owned),
+    })
 }
 
 fn parse_model_reference(value: &str) -> Result<(&str, &str)> {
@@ -231,5 +273,41 @@ mod tests {
         assert_eq!(route.model, "grader");
         assert_eq!(route.base_url, "https://example.test/v1");
         assert_eq!(route.api_key, "secret");
+    }
+
+    #[test]
+    fn discovers_codex_reasoning_effort_without_judge_model() {
+        let directory = tempfile::tempdir().unwrap();
+        let config_directory = directory.path().join(".a3s");
+        std::fs::create_dir(&config_directory).unwrap();
+        std::fs::write(
+            config_directory.join("config.acl"),
+            "bench { codex_reasoning_effort = \"none\" }",
+        )
+        .unwrap();
+
+        let discovered = discover(directory.path()).unwrap();
+        assert_eq!(discovered.judge_model, None);
+        assert_eq!(discovered.codex_reasoning_effort.as_deref(), Some("none"));
+    }
+
+    #[test]
+    fn rejects_invalid_codex_reasoning_effort() {
+        let document =
+            a3s_acl::parse("bench { codex_reasoning_effort = \"invalid-reasoning-effort\" }")
+                .unwrap();
+        let error = parse_bench(&document).err().unwrap();
+        assert!(error
+            .to_string()
+            .contains("reasoning effort must be one of"));
+    }
+
+    #[test]
+    fn rejects_unknown_bench_attributes() {
+        let document = a3s_acl::parse("bench { reasoning_effort = \"none\" }").unwrap();
+        let error = parse_bench(&document).err().unwrap();
+        assert!(error
+            .to_string()
+            .contains("supports only judge_model and codex_reasoning_effort"));
     }
 }

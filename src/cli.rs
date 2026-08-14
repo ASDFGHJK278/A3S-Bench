@@ -241,10 +241,12 @@ fn advanced_candidate_lock(args: &[String]) -> Result<u8> {
     }
     let output = output.ok_or_else(|| anyhow::anyhow!("candidate lock requires --out"))?;
     let state_root = workspace::state_root()?;
-    let value = lock::create_candidate_with_options(
+    let config = config::discover(&std::env::current_dir()?)?;
+    let value = lock::create_candidate_with_codex_default(
         source,
         model,
         reasoning_effort,
+        config.codex_reasoning_effort,
         &state_root,
         Path::new(&output),
     )?;
@@ -260,12 +262,20 @@ fn doctor(args: &[String]) -> Result<u8> {
     if json_output {
         crate::output::print_success(
             "advanced doctor",
-            json!({"config":config.path,"runtime":status,"judge_model":config.judge_model}),
+            json!({
+                "config":config.path,
+                "runtime":status,
+                "judge_model":config.judge_model,
+                "codex_reasoning_effort":config.codex_reasoning_effort
+            }),
         )?;
     } else {
         println!("Runtime {} is ready ({})", status.provider, status.detail);
         if let Some(model) = config.judge_model {
             println!("Judge model route: {model}");
+        }
+        if let Some(effort) = config.codex_reasoning_effort {
+            println!("Codex reasoning effort: {effort}");
         }
     }
     Ok(0)

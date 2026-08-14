@@ -145,6 +145,11 @@ accept the same reasoning-effort value; when present, it participates in suite
 identity and resume matching. The historical native Codex v2 lock is rejected
 with an instruction to regenerate a v3 lock.
 
+For `run` and the advanced Candidate-lock command, an absent CLI value may be
+supplied by `bench.codex_reasoning_effort` in `.a3s/config.acl`; the resolved
+value is bound into the new lock. Existing locks, AgentTool Candidates, and
+suite specs do not inherit that ambient default.
+
 ## Verification evidence
 
 The local validation on 2026-08-14 recorded the following real model and

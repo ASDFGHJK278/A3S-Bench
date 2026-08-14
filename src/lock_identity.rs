@@ -20,6 +20,17 @@ struct CandidateLockIdentity<'a> {
     candidate_revision: &'a str,
     artifact_digest: &'a str,
     model: &'a Option<String>,
+    reasoning_effort: &'a Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    product: &'a Option<crate::lock::CandidateProductLock>,
+}
+
+#[derive(Serialize)]
+struct LegacyCandidateLockIdentity<'a> {
+    schema: &'a str,
+    candidate_revision: &'a str,
+    artifact_digest: &'a str,
+    model: &'a Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     product: &'a Option<crate::lock::CandidateProductLock>,
 }
@@ -37,13 +48,27 @@ pub fn task(value: &TaskLock) -> Result<String> {
 }
 
 pub fn candidate(value: &CandidateLock) -> Result<String> {
-    digest(&CandidateLockIdentity {
-        schema: &value.schema,
-        candidate_revision: &value.candidate_revision,
-        artifact_digest: &value.artifact_digest,
-        model: &value.model,
-        product: &value.product,
-    })
+    if value.schema == "a3s.bench.candidate-lock.v3" {
+        digest(&CandidateLockIdentity {
+            schema: &value.schema,
+            candidate_revision: &value.candidate_revision,
+            artifact_digest: &value.artifact_digest,
+            model: &value.model,
+            reasoning_effort: &value.reasoning_effort,
+            product: &value.product,
+        })
+    } else {
+        // v1/v2 are intentionally hashed with their historical identity.  A
+        // legacy native-Codex lock is not reinterpreted as a v3 containerized
+        // lock merely because it can be deserialized.
+        digest(&LegacyCandidateLockIdentity {
+            schema: &value.schema,
+            candidate_revision: &value.candidate_revision,
+            artifact_digest: &value.artifact_digest,
+            model: &value.model,
+            product: &value.product,
+        })
+    }
 }
 
 fn digest(value: &impl Serialize) -> Result<String> {
@@ -75,6 +100,7 @@ mod tests {
             candidate_revision: format!("sha256:{}", "a".repeat(64)),
             artifact_digest: format!("sha256:{}", "b".repeat(64)),
             model: None,
+            reasoning_effort: None,
             product: None,
         };
         let first = candidate(&value).unwrap();
@@ -86,8 +112,18 @@ mod tests {
         value.product = Some(crate::lock::CandidateProductLock {
             name: "codex-cli".into(),
             version: "codex-cli 1.0.0".into(),
+            target_triple: None,
+            artifact_set_digest: None,
         });
         assert_ne!(model_digest, candidate(&value).unwrap());
+
+        value.schema = "a3s.bench.candidate-lock.v3".into();
+        value.product.as_mut().unwrap().target_triple = Some("x86_64-unknown-linux-musl".into());
+        value.product.as_mut().unwrap().artifact_set_digest =
+            Some(format!("sha256:{}", "f".repeat(64)));
+        let without_reasoning = candidate(&value).unwrap();
+        value.reasoning_effort = Some("none".into());
+        assert_ne!(without_reasoning, candidate(&value).unwrap());
 
         let task_lock = TaskLock {
             schema: "a3s.bench.task-lock.v1".into(),
@@ -104,5 +140,28 @@ mod tests {
         let mut with_model = task_lock;
         with_model.judge_model = Some("custom/grader".into());
         assert_ne!(first, task(&with_model).unwrap());
+    }
+
+    #[test]
+    fn historical_v2_identity_vector_is_unchanged() {
+        let value = CandidateLock {
+            schema: "a3s.bench.candidate-lock.v2".into(),
+            lock_digest: String::new(),
+            candidate_revision: format!("sha256:{}", "a".repeat(64)),
+            artifact_digest: format!("sha256:{}", "b".repeat(64)),
+            model: Some("gpt-5.6-luna".into()),
+            reasoning_effort: None,
+            product: Some(crate::lock::CandidateProductLock {
+                name: "codex-cli".into(),
+                version: "codex-cli 0.147.0".into(),
+                target_triple: None,
+                artifact_set_digest: None,
+            }),
+        };
+
+        assert_eq!(
+            candidate(&value).unwrap(),
+            "sha256:9023418da17f4ca30548996ee730c1d04efcacc01833e05ee9de66d34652e9b3"
+        );
     }
 }

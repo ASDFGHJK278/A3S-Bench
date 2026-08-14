@@ -122,6 +122,8 @@ fn execute_inner(
         &loaded.task,
         &loaded.candidate,
         loaded.model.as_deref(),
+        loaded.reasoning_effort.as_deref(),
+        loaded.codex_package.as_ref(),
         &config,
         &candidate_workspace,
         game.as_ref(),
@@ -227,6 +229,8 @@ fn execute_candidate(
     task: &task::TaskInfo,
     candidate: &asset::LocalAssetPackage,
     model: Option<&str>,
+    reasoning_effort: Option<&str>,
+    codex_package: Option<&crate::codex_package::CachedCodexPackage>,
     config: &config::LocalConfig,
     candidate_workspace: &Path,
     game: Option<&game_judge::GameSession>,
@@ -278,32 +282,44 @@ fn execute_candidate(
             game.is_none(),
             "Codex Candidate does not support game Tasks"
         );
+        anyhow::ensure!(
+            runtime_execution.provider == "docker",
+            "containerized Codex requires the Docker Runtime"
+        );
+        let codex_package = codex_package.ok_or_else(|| {
+            anyhow::anyhow!(
+                "containerized Codex Candidate is missing its verified package cache entry"
+            )
+        })?;
         let prompt = std::fs::read_to_string(task.root.join("public/prompt.md"))?;
         let instructions = std::fs::read_to_string(candidate.model_instructions_path()?)?;
         let log_dir = state_root.join("runs").join(run_id);
-        std::fs::create_dir_all(&log_dir)?;
-        return Ok(
-            match crate::codex_candidate::execute(
-                candidate_workspace,
-                &instructions,
-                &prompt,
-                model,
-                task.work_network_need == "public_internet",
-                task.candidate_timeout_sec,
-                Some(&log_dir.join("codex-events.jsonl")),
-            )? {
-                crate::codex_candidate::CodexOutcome::Completed(model_usage) => CandidateRun {
-                    execution: crate::result_record::CandidateExecution::completed(),
-                    model_usage,
-                },
-                crate::codex_candidate::CodexOutcome::TimedOut => CandidateRun {
-                    execution: crate::result_record::CandidateExecution::timed_out(
-                        task.candidate_timeout_sec,
-                    ),
-                    model_usage: None,
-                },
+        crate::state_fs::secure_directory(&log_dir)?;
+        let event_log = log_dir.join("codex-events.jsonl");
+        let request = crate::codex_candidate::CodexExecutionRequest {
+            task,
+            package: codex_package,
+            workspace: candidate_workspace,
+            instructions: &instructions,
+            task_prompt: &prompt,
+            model,
+            reasoning_effort,
+            timeout_sec: task.candidate_timeout_sec,
+            state_root,
+            event_log: Some(&event_log),
+        };
+        return Ok(match crate::codex_candidate::execute(request)? {
+            crate::codex_candidate::CodexOutcome::Completed(model_usage) => CandidateRun {
+                execution: crate::result_record::CandidateExecution::completed(),
+                model_usage,
             },
-        );
+            crate::codex_candidate::CodexOutcome::TimedOut => CandidateRun {
+                execution: crate::result_record::CandidateExecution::timed_out(
+                    task.candidate_timeout_sec,
+                ),
+                model_usage: None,
+            },
+        });
     }
     let Some(model) = model else {
         anyhow::ensure!(
@@ -423,12 +439,10 @@ fn validate_os_runtime_task(
     model: Option<&str>,
 ) -> Result<()> {
     anyhow::ensure!(
-        model.is_none()
-            || matches!(
-                candidate.protocol,
-                asset::CandidateProtocol::A3sCodeExec | asset::CandidateProtocol::CodexExec
-            ),
-        "os-runtime does not support model-backed Candidates yet"
+        candidate.protocol != asset::CandidateProtocol::CodexExec
+            && (model.is_none()
+                || candidate.protocol == asset::CandidateProtocol::A3sCodeExec),
+        "containerized Codex and model-backed Candidates require the Docker Runtime"
     );
     anyhow::ensure!(
         task.legacy_judge.is_none(),

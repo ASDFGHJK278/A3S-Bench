@@ -45,6 +45,24 @@ fn judge_model_references_are_closed() {
 }
 
 #[test]
+fn codex_reasoning_default_is_ignored_for_agent_tool() {
+    let state = tempfile::tempdir().unwrap();
+    let output = state.path().join("candidate.lock.json");
+    let value = create_candidate_with_codex_default(
+        "a3s-code-core",
+        None,
+        None,
+        Some("low".into()),
+        state.path(),
+        &output,
+    )
+    .unwrap();
+
+    assert_eq!(value.schema, "a3s.bench.candidate-lock.v1");
+    assert_eq!(value.reasoning_effort, None);
+}
+
+#[test]
 fn os_runtime_task_lock_binds_managed_runner_images_without_docker() {
     let state = tempfile::tempdir().unwrap();
     let output = state.path().join("task.lock.json");

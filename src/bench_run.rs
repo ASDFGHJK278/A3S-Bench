@@ -95,6 +95,7 @@ fn execute_inner(
         state_root,
         &journal.run_id,
         config.judge_model.clone(),
+        config.codex_reasoning_effort.clone(),
         &status.provider,
     )?;
     journal.bind_locks(&loaded.task_lock_digest, &loaded.candidate_lock_digest)?;

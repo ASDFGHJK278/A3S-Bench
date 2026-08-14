@@ -12,6 +12,7 @@ fn model_judge_requires_an_explicit_local_route() {
         path: None,
         runtime: crate::runtime_selection::RuntimeSelection::bench_default().unwrap(),
         judge_model: None,
+        codex_reasoning_effort: None,
     };
     let error = resolve_judge_model(&task, None, &config).err().unwrap();
     assert!(error.to_string().contains("requires bench.judge_model"));

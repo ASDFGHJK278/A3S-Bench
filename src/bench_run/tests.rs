@@ -83,6 +83,8 @@ fn model_candidate_game_and_task_owned_judge_run_end_to_end() {
         &task,
         &candidate,
         Some("openai/fake"),
+        None,
+        None,
         &config,
         &candidate_workspace,
         Some(&game),

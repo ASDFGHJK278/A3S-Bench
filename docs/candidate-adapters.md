@@ -58,8 +58,7 @@ workspace=$1
 
 The current development Docker path runs this entrypoint without network access
 or model-provider credentials. It is suitable for deterministic tools and for
-adapters whose complete dependencies are already in the locked work image. It
-is not a safe way to run a host-installed Codex or Claude Code CLI.
+adapters whose complete dependencies are already in the locked work image.
 
 A model-backed Candidate supplies `--model`. Bench reads the controller
 instructions from `source.definition_path`, obtains the named provider/model
@@ -87,27 +86,47 @@ The model-backed implementation above is a versioned A3S Code Core controller,
 not the interactive CLI or TUI host. A controller prompt named after Codex or
 Claude does not make it the Codex or Claude Code product.
 
-The bundled `codex` adapter is a separate native product protocol. It invokes a
-host-installed, already authenticated Codex CLI through `codex exec`, binds the
-reported CLI version into CandidateLock v2, uses an ephemeral session, ignores
-ambient user configuration and rules, and gives generated commands only the
-benchmark workspace. Provider credentials remain owned by Codex and are not
-copied into the adapter or lock.
+### Bundled Codex Candidate
+
+The bundled `codex` adapter uses the native Codex CLI product, but executes it
+inside the Task work Docker container. Bench verifies the complete official
+standalone package prepared from the host installation, copies it into a
+content-addressed cache, and mounts the verified package read-only for each
+run. Runs reuse that cache; Codex is not downloaded or installed for each run.
+
+Bench copies the host login `auth.json` from `$CODEX_HOME/auth.json` or
+`$HOME/.codex/auth.json` into a private per-run home and mounts the copy into
+the container. `A3S_BENCH_CODEX_AUTH_FILE` can select an explicit source. The
+original is never mounted, and no `OPENAI_API_KEY` or `CODEX_API_KEY` is passed.
+
+To match EdgeBench, Codex's internal sandbox is disabled. The outer Docker
+container is therefore the security boundary: model tools can read files
+visible inside that container, including the copied `auth.json`, and can modify
+the mounted workspace. Do not treat Codex's internal sandbox as an additional
+boundary for files mounted into the container.
+
+Select the Codex model with `--model` and reasoning effort with
+`--reasoning-effort`. Valid efforts are `none`, `minimal`, `low`, `medium`,
+`high`, and `xhigh`; omitted values leave Codex's defaults selected. Both
+values, including absence, are bound into Candidate identity.
 
 ```bash
-codex login status
-a3s bench run ./task --agent codex
-a3s bench run ./task --agent codex --model <codex-model-id>
+a3s bench run ./task \
+  --agent codex \
+  --model <model> \
+  --reasoning-effort none
 ```
 
-`--model` is passed directly to Codex for this adapter, so use a Codex model ID,
-not an A3S `provider/model` route. Bench refuses locked execution after the
-installed Codex CLI version changes; create a new CandidateLock so comparisons
-remain attributable to an exact product version.
+The Codex Candidate produces `a3s.bench.candidate-lock.v3`. Its `product`
+contains the Codex package name, version, target triple, and artifact-set
+digest; `lock_digest` binds those values with the Candidate revision, artifact,
+model, and reasoning effort. Locked execution uses the bound values and rejects
+overrides.
 
 ## Lock before comparing
 
-Create one TaskLock and one CandidateLock per exact adapter/model combination:
+Create one TaskLock and one CandidateLock per exact adapter, model, and
+reasoning-effort combination:
 
 ```bash
 a3s bench advanced task lock ./task --out ./task.lock.json
@@ -120,9 +139,21 @@ a3s bench run ./task.lock.json \
   --locked
 ```
 
+`a3s-code` and ordinary executable/model Candidates use CandidateLock v1. A
+legacy native-Codex CandidateLock v2 is intentionally rejected instead of being
+treated as a containerized lock; regenerate it with:
+
+```bash
+a3s bench advanced candidate lock codex \
+  --model <model> \
+  --reasoning-effort none \
+  --out ./codex.candidate.lock.json
+```
+
 Use distinct Candidate adapter revisions to compare complete coding-agent
-products. Use one adapter revision with different model bindings to isolate
-model behavior. In both cases, run the CandidateLocks against the same TaskLock.
+products. Use one adapter revision with different model bindings or reasoning
+efforts to isolate model behavior. In both cases, run the CandidateLocks
+against the same TaskLock.
 
 ## OCI publication
 

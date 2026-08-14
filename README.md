@@ -70,8 +70,9 @@ a3s bench result <run-id> --json
 ```
 
 Compare completed runs in Task-lock-matched pairs. Every baseline result must
-identify the same Candidate and model, as must every candidate result; Bench
-rejects mixed identities and pairs produced from different Task locks.
+use one CandidateLock identity, including its model and reasoning effort, as
+must every candidate result; Bench rejects mixed identities and pairs produced
+from different Task locks.
 
 ```bash
 a3s bench compare \
@@ -169,7 +170,7 @@ run an arbitrary directory, host executable, or container image.
 | Source | Reference |
 | --- | --- |
 | Bundled model controller | `a3s-code` |
-| Native Codex product | `codex` (authenticated Codex CLI required) |
+| Bundled Codex CLI product | `codex` (verified package and Codex login required) |
 | Local adapter | `./agents/my-agent` |
 | Docker-compatible OCI package | `oci://ghcr.io/acme/my-agent@sha256:<digest>` |
 | Generic OCI artifact | `oci://registry.example.com/acme/my-agent@sha256:<digest>` |
@@ -201,23 +202,54 @@ Local packages reject escaping paths, unsafe links, and special files during
 snapshotting. See [Candidate adapter authoring](docs/candidate-adapters.md) for
 the executable, model-backed, local, and OCI contracts.
 
-### Model-backed comparisons
+### Model and Codex selections
 
-`--model` binds an exact configured `provider/model` route into the
-CandidateLock. Credentials remain in `.a3s/config.acl`; locks and results record
-identity and usage, not provider secrets.
+`--model` is generic, but its value is Candidate-specific. For `a3s-code`, use
+an exact configured `provider/model` route; for the bundled `codex` Candidate,
+use a Codex model identifier. The selected value is bound into the
+CandidateLock. `--reasoning-effort` is supported by `codex` and accepts `none`,
+`minimal`, `low`, `medium`, `high`, or `xhigh`. Both selections, including
+their absence, are part of Candidate identity.
 
 ```bash
 a3s bench run quick_file_edit \
   --agent a3s-code \
   --model openai/gpt-5.2-codex
+
+a3s bench run quick_file_edit \
+  --agent codex \
+  --model <model> \
+  --reasoning-effort none
 ```
 
-The `a3s-code` adapter uses A3S Code Core 5.3.4 as a versioned controller.
-Varying the model compares models under that same controller. The separate
-`codex` adapter runs the native Codex CLI and binds its reported version into
-the CandidateLock, enabling complete-product comparisons without presenting a
-prompt template as the Codex product.
+For `a3s-code`, credentials remain in `.a3s/config.acl`; locks and results
+record identity and usage, not provider secrets. The adapter uses A3S Code Core
+5.3.4 as a versioned controller, so varying the model compares models under
+that same controller.
+
+The bundled `codex` Candidate is the native Codex CLI product, but it is not
+host-native execution. Bench verifies the complete official standalone package
+prepared from the host installation, stores it in a content-addressed cache,
+and bind-mounts that cache read-only into the Task work Docker container. Runs
+reuse the cache; Codex is not downloaded or installed for each run.
+
+Before a Codex run, Bench copies the host login `auth.json` (from
+`$CODEX_HOME/auth.json` or `$HOME/.codex/auth.json`) into a private per-run
+home and mounts that copy into the same container. It does not pass
+`OPENAI_API_KEY` or `CODEX_API_KEY`. To match EdgeBench, Codex's internal
+sandbox is disabled, so the outer Docker container is the security boundary:
+model tools can read files visible inside that container, including the copied
+`auth.json`.
+
+The Codex Candidate uses CandidateLock v3. Its `product` identity records the
+Codex package name, version, target triple, and artifact-set digest; the lock
+digest also binds the Candidate revision, artifact, model, and reasoning
+effort. A locked run uses those values and rejects model or reasoning overrides.
+
+The `a3s-code` adapter and ordinary Agent Candidates continue to use
+CandidateLock v1. A legacy native-Codex CandidateLock v2 is intentionally
+rejected rather than reinterpreted as a containerized lock; regenerate it with
+the current `codex` Candidate lock command to produce v3.
 
 ## Runtime providers
 
@@ -259,6 +291,11 @@ a3s bench advanced task lock quick_file_edit \
 a3s bench advanced candidate lock a3s-code \
   --model openai/gpt-5.2-codex \
   --out ./candidate.lock.json
+
+a3s bench advanced candidate lock codex \
+  --model <model> \
+  --reasoning-effort none \
+  --out ./codex.candidate.lock.json
 
 a3s bench run ./task.lock.json \
   --agent ./candidate.lock.json \
@@ -308,7 +345,7 @@ Read the [Task Spec ACL](docs/task-spec-acl.md) for the complete schema and the
 ```text
 a3s bench list [--all] [--json]
 a3s bench info <task> [--all] [--json]
-a3s bench run <task> --agent <candidate> [--model <provider/model>] [--locked] [--json]
+a3s bench run <task> --agent <candidate> [--model <model>] [--reasoning-effort <effort>] [--locked] [--json]
 a3s bench result [run-id] [--json]
 a3s bench compare <baseline-run> <candidate-run> [<baseline-run> <candidate-run> ...] [--json]
 a3s bench suite run <suite.acl> [--resume <suite-run-id>] [--json]
@@ -316,7 +353,7 @@ a3s bench suite run <suite.acl> [--resume <suite-run-id>] [--json]
 a3s bench advanced check <./task>
 a3s bench advanced doctor [--json]
 a3s bench advanced task lock <source> --out <file>
-a3s bench advanced candidate lock <candidate> [--model <provider/model>] --out <file>
+a3s bench advanced candidate lock <candidate> [--model <model>] [--reasoning-effort <effort>] --out <file>
 ```
 
 The public entrypoint is `a3s bench`. The managed `a3s-bench` executable is a

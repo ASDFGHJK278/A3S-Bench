@@ -136,7 +136,11 @@ enum JudgeExitClass {
 
 fn classify_judge_exit(source: &LegacyJudgeSource, exit_code: Option<i32>) -> JudgeExitClass {
     match exit_code {
-        None | Some(137 | 143) => JudgeExitClass::Abnormal,
+        // Docker reserves 125 for a failure to run the container and 126/127
+        // for an uninvokable or missing container command. GNU timeout also
+        // propagates 126/127 when its command cannot be invoked. None of
+        // these statuses represents a scoreable candidate result.
+        None | Some(125..=127 | 137 | 143) => JudgeExitClass::Abnormal,
         Some(124) if source.requires_model_gateway => JudgeExitClass::ModelGatewayTimeout,
         Some(124) => JudgeExitClass::CandidateTimeout,
         _ => JudgeExitClass::Completed,
@@ -757,7 +761,7 @@ mod tests {
     #[test]
     fn judge_exit_classification_separates_candidate_and_infrastructure_failures() {
         let source = structured_source();
-        for exit_code in [None, Some(137), Some(143)] {
+        for exit_code in [None, Some(125), Some(126), Some(127), Some(137), Some(143)] {
             assert_eq!(
                 classify_judge_exit(&source, exit_code),
                 JudgeExitClass::Abnormal
@@ -768,6 +772,9 @@ mod tests {
             classify_judge_exit(&source, Some(124)),
             JudgeExitClass::CandidateTimeout
         );
+        // Ordinary non-zero Judge exits remain scoreable: pytest uses 1 for
+        // test failures and 2 for interrupted/collection failures, and both
+        // can be caused by the candidate submission.
         for exit_code in [Some(0), Some(1), Some(2)] {
             assert_eq!(
                 classify_judge_exit(&source, exit_code),

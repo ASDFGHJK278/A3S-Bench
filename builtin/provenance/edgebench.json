@@ -259,7 +259,7 @@
       "generated_sha256": {
         "private/judge/.a3s/asset.acl": "sha256:be1438eac85beacf287ab7f33148c3e2fd70dbf3e5913c22e247d94430140e15",
         "private/judge/agent.md": "sha256:8d75eb1f86d1dc153d4db3c9b83f7d0564d3ff6e4767c018875b4d544f60bbb7",
-        "private/judge/judge.source.json": "sha256:5c778c0af743daca05cf6d2e63215c1068d276aad94dab547edd7b37053c0b8c",
+        "private/judge/judge.source.json": "sha256:f472af39adfdae2adadd4edfb91ed4bb5c70ab913e79bfc191c034f959e09976",
         "public/prompt.md": "sha256:d46f1cf94f42c557b184de8c5cf8af46cccfe7d0bceabfec1a05229bfdca2da6",
         "task.acl": "sha256:1c6cc6ac930d08057e456a5f06eef41c26257565a24f9a46bba5a81906a77e70"
       },

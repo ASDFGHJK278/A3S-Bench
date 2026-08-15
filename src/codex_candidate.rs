@@ -30,6 +30,8 @@ const MAX_STDOUT_CAPTURE: usize = 4 * 1024 * 1024;
 const MAX_STDERR_CAPTURE: usize = 512 * 1024;
 const CONTAINER_CLEANUP_TIMEOUT: Duration = Duration::from_secs(15);
 const CONTAINER_CLEANUP_RETRY_TIMEOUT: Duration = Duration::from_secs(600);
+const WORKSPACE_INVENTORY_MAX_BYTES: usize = 64 * 1024 * 1024;
+const WORKSPACE_INVENTORY_MAX_ENTRIES: usize = 1_000_000;
 const CONTAINER_MUTATION_SETTLE_TIMEOUT: Duration = Duration::from_secs(60);
 const CONTAINER_CLEANUP_RETRY_INTERVAL: Duration = Duration::from_millis(250);
 const CONTAINER_STAGING_TIMEOUT: Duration = Duration::from_secs(600);
@@ -65,6 +67,7 @@ pub struct CodexExecutionRequest<'a> {
 struct CodexResources {
     main_container: String,
     staging_container: String,
+    export_container: String,
     package_volume: String,
     home_volume: String,
     workspace_volume: String,
@@ -110,6 +113,7 @@ impl CodexResources {
         });
         Self {
             staging_container: format!("{main_container}-stage"),
+            export_container: format!("{main_container}-export"),
             package_volume: format!("{main_container}-package"),
             home_volume: format!("{main_container}-home"),
             workspace_volume: format!("{main_container}-workspace"),
@@ -557,6 +561,171 @@ impl Drop for CodexRunGuard {
     }
 }
 
+fn remaining_workspace_export_time(deadline: Instant) -> Result<Duration> {
+    let remaining = deadline
+        .checked_duration_since(Instant::now())
+        .ok_or_else(|| anyhow::anyhow!("workspace OCI export exceeded its fixed deadline"))?;
+    anyhow::ensure!(
+        !remaining.is_zero(),
+        "workspace OCI export exceeded its fixed deadline"
+    );
+    Ok(remaining)
+}
+
+fn workspace_inventory_mount(
+    resources: &CodexResources,
+    container_workspace: &str,
+    seeded: bool,
+) -> String {
+    if seeded {
+        format!(
+            "type=volume,src={},dst={container_workspace},volume-subpath=tree,volume-nocopy,readonly",
+            resources.workspace_volume
+        )
+    } else {
+        format!(
+            "type=volume,src={},dst={container_workspace},volume-nocopy,readonly",
+            resources.workspace_volume
+        )
+    }
+}
+fn enumerate_container_workspace_files(
+    request: &CodexExecutionRequest<'_>,
+    resources: &CodexResources,
+    container_workspace: &str,
+    deadline: Instant,
+) -> Result<Vec<PathBuf>> {
+    let paths = request.package.container_paths()?;
+    let ripgrep = container_path(&format!("{}/rg", paths.path_dir));
+    let mut create = Command::new("docker");
+    create.args([
+        "create",
+        "--pull",
+        "never",
+        "--name",
+        &resources.export_container,
+        "--read-only",
+        "--cap-drop",
+        "ALL",
+        "--security-opt",
+        "no-new-privileges",
+    ]);
+    resources
+        .metadata()
+        .add_labels(&mut create, &resources.export_container);
+    create.args(crate::runtime_profile::WORK_DOCKER_LIMITS);
+    create.args(["--network", "none"]);
+    if let Some(platform) = request.task.work_platform.as_deref() {
+        create.args(["--platform", platform]);
+    }
+    create.arg("--mount").arg(workspace_inventory_mount(
+        resources,
+        container_workspace,
+        request.seed_workspace.is_some(),
+    ));
+    create
+        .arg("--mount")
+        .arg(format!(
+            "type=volume,src={},dst={CONTAINER_PACKAGE},volume-subpath=codex,readonly",
+            resources.package_volume
+        ))
+        .arg("--workdir")
+        .arg(container_workspace)
+        .arg("--entrypoint")
+        .arg(ripgrep)
+        .arg(&request.task.work_image)
+        .args([
+            "--files",
+            "--null",
+            "--hidden",
+            "--no-ignore",
+            "--no-config",
+            "--path-separator",
+            "/",
+        ]);
+
+    let (created, create_timed_out) =
+        output_with_timeout(&mut create, remaining_workspace_export_time(deadline)?)
+            .context("could not create the terminal workspace inventory container")?;
+    if create_timed_out {
+        resources.mark_pending_mutation();
+        wait_for_delayed_container(&resources.export_container)?;
+        anyhow::bail!("terminal workspace inventory container creation timed out");
+    }
+    anyhow::ensure!(
+        created.status.success() && !created.stdout_truncated && !created.stderr_truncated,
+        "could not create the terminal workspace inventory container: {}",
+        cleanup_diagnostics(&created)
+    );
+    let container_id = owned_container_id(&resources.export_container)?
+        .ok_or_else(|| anyhow::anyhow!("terminal workspace inventory container disappeared"))?;
+    let mut start = Command::new("docker");
+    start.args(["start", "--attach", &container_id]);
+    let (output, timed_out) = output_with_timeout_limits(
+        &mut start,
+        remaining_workspace_export_time(deadline)?,
+        WORKSPACE_INVENTORY_MAX_BYTES,
+        MAX_STDERR_CAPTURE,
+    )
+    .context("could not enumerate the terminal container workspace")?;
+    if timed_out {
+        resources.mark_pending_mutation();
+        stop_container_process(&resources.export_container)?;
+        anyhow::bail!("terminal workspace inventory exceeded the workspace export deadline");
+    }
+    anyhow::ensure!(
+        !output.stdout_truncated,
+        "terminal workspace inventory exceeded its fixed output limit"
+    );
+    anyhow::ensure!(
+        !output.stderr_truncated,
+        "terminal workspace inventory diagnostics exceeded their fixed output limit"
+    );
+    let code = output.status.code();
+    anyhow::ensure!(
+        code == Some(0) || (code == Some(1) && output.stdout.is_empty()),
+        "terminal workspace inventory failed with {}: {}",
+        output.status,
+        cleanup_diagnostics(&output)
+    );
+    parse_workspace_inventory(&output.stdout)
+}
+
+fn parse_workspace_inventory(bytes: &[u8]) -> Result<Vec<PathBuf>> {
+    if bytes.is_empty() {
+        return Ok(Vec::new());
+    }
+    anyhow::ensure!(
+        bytes.last() == Some(&0),
+        "terminal workspace inventory is not NUL terminated"
+    );
+    let mut seen = BTreeSet::new();
+    let mut paths = Vec::new();
+    for raw in bytes[..bytes.len() - 1].split(|byte| *byte == 0) {
+        anyhow::ensure!(
+            paths.len() < WORKSPACE_INVENTORY_MAX_ENTRIES,
+            "terminal workspace inventory exceeded its fixed entry limit"
+        );
+        let text =
+            std::str::from_utf8(raw).context("terminal workspace inventory path is not UTF-8")?;
+        anyhow::ensure!(
+            !text.is_empty(),
+            "terminal workspace inventory contains an empty path"
+        );
+        let path = PathBuf::from(text);
+        let normalized = crate::submission::normalize_terminal_path(&path)?;
+        anyhow::ensure!(
+            normalized == text,
+            "terminal workspace inventory path is not canonical POSIX syntax"
+        );
+        anyhow::ensure!(
+            seen.insert(normalized),
+            "terminal workspace inventory contains a duplicate path"
+        );
+        paths.push(path);
+    }
+    Ok(paths)
+}
 pub fn execute(request: CodexExecutionRequest<'_>) -> Result<CodexOutcome> {
     let main_container = container_name();
     let metadata = RunMetadata::current(main_container.clone())?;
@@ -634,10 +803,22 @@ pub fn execute(request: CodexExecutionRequest<'_>) -> Result<CodexOutcome> {
         let events = private_home.redact(&output.stdout);
         let diagnostics = private_home.redact(&output.stderr);
         persist_events(request.event_log, &events)?;
-        crate::workspace::export_container_tree(
+        let export_deadline = Instant::now()
+            .checked_add(crate::workspace::CONTAINER_TREE_EXPORT_TIMEOUT)
+            .ok_or_else(|| anyhow::anyhow!("workspace export deadline overflowed"))?;
+        let terminal_files = enumerate_container_workspace_files(
+            &request,
+            &resources,
+            &container_workspace,
+            export_deadline,
+        )?;
+        crate::workspace::export_container_files(
             &container_id,
             &container_workspace,
             request.workspace,
+            &terminal_files,
+            &request.task.submission,
+            export_deadline,
         )
         .context("could not export the containerized Codex workspace")?;
         if timed_out {
@@ -1251,6 +1432,15 @@ struct BoundedCapture {
 }
 
 fn output_with_timeout(command: &mut Command, timeout: Duration) -> Result<(CommandOutput, bool)> {
+    output_with_timeout_limits(command, timeout, MAX_STDOUT_CAPTURE, MAX_STDERR_CAPTURE)
+}
+
+fn output_with_timeout_limits(
+    command: &mut Command,
+    timeout: Duration,
+    stdout_limit: usize,
+    stderr_limit: usize,
+) -> Result<(CommandOutput, bool)> {
     let mut child = command
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
@@ -1264,8 +1454,8 @@ fn output_with_timeout(command: &mut Command, timeout: Duration) -> Result<(Comm
         .stderr
         .take()
         .ok_or_else(|| anyhow::anyhow!("Codex stderr pipe was unavailable"))?;
-    let stdout_thread = std::thread::spawn(move || drain_bounded(stdout, MAX_STDOUT_CAPTURE));
-    let stderr_thread = std::thread::spawn(move || drain_bounded(stderr, MAX_STDERR_CAPTURE));
+    let stdout_thread = std::thread::spawn(move || drain_bounded(stdout, stdout_limit));
+    let stderr_thread = std::thread::spawn(move || drain_bounded(stderr, stderr_limit));
     let deadline = Instant::now() + timeout;
     let timed_out = loop {
         if child.try_wait()?.is_some() {
@@ -1926,6 +2116,7 @@ fn all_resources_absent(resources: &CodexResources) -> Result<bool> {
         resources.main_container.as_str(),
         resources.proxy_container.as_deref().unwrap_or_default(),
         resources.staging_container.as_str(),
+        resources.export_container.as_str(),
     ] {
         if !container.is_empty() && owned_container_id(container)?.is_some() {
             return Ok(false);
@@ -1949,6 +2140,7 @@ fn remove_resources_once(resources: &CodexResources) -> Result<()> {
     let mut containers = vec![resources.main_container.as_str()];
     containers.extend(resources.proxy_container.as_deref());
     containers.push(resources.staging_container.as_str());
+    containers.push(resources.export_container.as_str());
     for container in containers {
         if let Err(error) = remove_container(container) {
             failures.push(format!("{container}: {error:#}"));
@@ -2172,6 +2364,38 @@ fn optional_usize_field(value: &Value, name: &str) -> Result<Option<usize>> {
 mod tests {
     use super::*;
 
+    #[test]
+    fn workspace_inventory_mount_is_read_only_and_disables_copy_up() {
+        let resources = CodexResources::new("inventory-mount-test".into(), false);
+        let seeded = workspace_inventory_mount(&resources, "/workspace/tree", true);
+        assert!(seeded.contains("volume-subpath=tree"));
+        assert!(seeded.contains("volume-nocopy"));
+        assert!(seeded.ends_with(",readonly"));
+        let unseeded = workspace_inventory_mount(&resources, "/workspace", false);
+        assert!(!unseeded.contains("volume-subpath"));
+        assert!(unseeded.contains("volume-nocopy"));
+        assert!(unseeded.ends_with(",readonly"));
+    }
+    #[test]
+    fn workspace_inventory_parser_accepts_only_canonical_nul_frames() {
+        assert_eq!(
+            parse_workspace_inventory(b"src/main.rs\0README\0").unwrap(),
+            vec![PathBuf::from("src/main.rs"), PathBuf::from("README")]
+        );
+        assert!(parse_workspace_inventory(b"unterminated").is_err());
+        assert!(parse_workspace_inventory(b"one\0\0two\0").is_err());
+        assert!(parse_workspace_inventory(b"same\0same\0").is_err());
+        assert!(parse_workspace_inventory(b"/absolute\0").is_err());
+        assert!(parse_workspace_inventory(&[0xff, 0]).is_err());
+    }
+
+    #[test]
+    fn workspace_inventory_parser_preserves_the_terminal_depth_limit() {
+        let deep = format!("{}\0", vec!["d"; 66].join("/"));
+        assert!(parse_workspace_inventory(deep.as_bytes()).is_err());
+        let boundary = format!("{}\0", vec!["d"; 65].join("/"));
+        assert!(parse_workspace_inventory(boundary.as_bytes()).is_ok());
+    }
     #[test]
     fn extracts_structured_failure_before_stderr() {
         let events = concat!(

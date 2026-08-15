@@ -23,6 +23,7 @@ struct CandidateRun {
 
 struct TransientRunDirs {
     workspace: Option<PathBuf>,
+    seed_workspace: Option<PathBuf>,
     submission: Option<PathBuf>,
 }
 
@@ -30,6 +31,7 @@ impl TransientRunDirs {
     fn new() -> Self {
         Self {
             workspace: None,
+            seed_workspace: None,
             submission: None,
         }
     }
@@ -44,6 +46,9 @@ impl Drop for TransientRunDirs {
         // would silently fail to reclaim it; `remove_tree` restores
         // writability first.
         if let Some(path) = self.workspace.take() {
+            let _ = crate::state_fs::remove_tree(&path);
+        }
+        if let Some(path) = self.seed_workspace.take() {
             let _ = crate::state_fs::remove_tree(&path);
         }
         if let Some(path) = self.submission.take() {
@@ -112,8 +117,19 @@ fn execute_inner(
     journal.advance(RunStage::InputsResolved)?;
     let game = start_game(&loaded.task, state_root)?;
     let mut transient = TransientRunDirs::new();
-    let candidate_workspace = workspace::create(&loaded.task)?;
+    let native_codex = loaded.candidate.protocol == asset::CandidateProtocol::CodexExec;
+    let candidate_workspace = if native_codex {
+        workspace::create_empty(&loaded.task)?
+    } else {
+        workspace::create(&loaded.task)?
+    };
     transient.workspace = Some(candidate_workspace.clone());
+    let seed_workspace = native_codex
+        .then(|| requires_host_workspace(&loaded.task))
+        .filter(|required| *required)
+        .map(|_| workspace::create(&loaded.task))
+        .transpose()?;
+    transient.seed_workspace = seed_workspace.clone();
     journal.advance(RunStage::CandidateRunning)?;
     let runtime_execution = RuntimeExecution {
         provider: &status.provider,
@@ -127,6 +143,7 @@ fn execute_inner(
         loaded.codex_package.as_ref(),
         &config,
         &candidate_workspace,
+        seed_workspace.as_deref(),
         game.as_ref(),
         &runtime_execution,
         &journal.run_id,
@@ -184,6 +201,14 @@ fn execute_inner(
     Ok(CompletedRun { record })
 }
 
+fn requires_host_workspace(task: &task::TaskInfo) -> bool {
+    task.root.join("public/workspace").is_dir()
+        || task
+            .workspace_seed
+            .as_ref()
+            .is_none_or(|seed| seed.image != task.work_image)
+}
+
 fn resolve_judge_model(
     task: &task::TaskInfo,
     locked_reference: Option<&str>,
@@ -234,6 +259,7 @@ fn execute_candidate(
     codex_package: Option<&crate::codex_package::CachedCodexPackage>,
     config: &config::LocalConfig,
     candidate_workspace: &Path,
+    candidate_seed_workspace: Option<&Path>,
     game: Option<&game_judge::GameSession>,
     runtime_execution: &RuntimeExecution<'_>,
     run_id: &str,
@@ -301,6 +327,7 @@ fn execute_candidate(
             task,
             package: codex_package,
             workspace: candidate_workspace,
+            seed_workspace: candidate_seed_workspace,
             instructions: &instructions,
             task_prompt: &prompt,
             model,

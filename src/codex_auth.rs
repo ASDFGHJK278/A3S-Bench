@@ -33,6 +33,26 @@ impl PrivateCodexHome {
         &self.codex_path
     }
 
+    pub fn prepare_for_container_copy(&self) -> Result<()> {
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+
+            // This is a short-lived benchmark-owned copy below an owner-only
+            // parent. Docker Desktop does not consistently preserve its uid
+            // when archiving into a volume, so make the isolated copy usable
+            // regardless of the uid assigned inside the task container.
+            for path in [&self.path, &self.codex_path] {
+                std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o777))?;
+            }
+            std::fs::set_permissions(
+                self.codex_path.join("auth.json"),
+                std::fs::Permissions::from_mode(0o666),
+            )?;
+        }
+        Ok(())
+    }
+
     pub fn redact(&self, bytes: &[u8]) -> Vec<u8> {
         redact_bytes(bytes, &self.secrets)
     }
@@ -452,6 +472,42 @@ mod tests {
         }
         assert!(!home_path.exists());
         assert!(source.exists());
+    }
+
+    #[test]
+    fn container_copy_is_uid_independent_without_changing_the_source() {
+        let root = tempfile::tempdir().unwrap();
+        let source = root.path().join("fake-auth.json");
+        std::fs::write(&source, r#"{"access_token":"fake"}"#).unwrap();
+        std::fs::set_permissions(&source, std::fs::Permissions::from_mode(0o600)).unwrap();
+        let home = stage_from_source(&root.path().join("state"), &source).unwrap();
+
+        home.prepare_for_container_copy().unwrap();
+
+        assert_eq!(
+            std::fs::metadata(home.path()).unwrap().permissions().mode() & 0o777,
+            0o777
+        );
+        assert_eq!(
+            std::fs::metadata(home.codex_path())
+                .unwrap()
+                .permissions()
+                .mode()
+                & 0o777,
+            0o777
+        );
+        assert_eq!(
+            std::fs::metadata(home.codex_path().join("auth.json"))
+                .unwrap()
+                .permissions()
+                .mode()
+                & 0o777,
+            0o666
+        );
+        assert_eq!(
+            std::fs::metadata(&source).unwrap().permissions().mode() & 0o777,
+            0o600
+        );
     }
 
     #[test]

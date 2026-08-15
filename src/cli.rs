@@ -264,6 +264,7 @@ fn doctor(args: &[String]) -> Result<u8> {
             "advanced doctor",
             json!({
                 "config":config.path,
+                "bench_config":config.bench_path,
                 "runtime":status,
                 "judge_model":config.judge_model,
                 "codex_reasoning_effort":config.codex_reasoning_effort

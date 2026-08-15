@@ -1,6 +1,51 @@
 use super::*;
 use std::io::{Read, Write};
 use std::net::TcpListener;
+#[test]
+fn native_codex_materializes_only_non_native_workspace_sources() {
+    let root = tempfile::tempdir().unwrap();
+    let mut task = task::TaskInfo {
+        id: "test".into(),
+        name: "test".into(),
+        category: "test".into(),
+        judge_asset: "judge".into(),
+        work_image: "example/work@sha256:same".into(),
+        work_platform: None,
+        work_network_need: "none".into(),
+        candidate_timeout_sec: 1,
+        metrics: vec![],
+        workspace_seed: Some(task::WorkspaceSeed {
+            image: "example/work@sha256:same".into(),
+            source_path: "/app".into(),
+            platform: None,
+        }),
+        submission: task::SubmissionPolicy {
+            include: vec!["**".into()],
+            exclude: vec![],
+            max_files: 1,
+            max_total_bytes: 1,
+            max_file_bytes: 1,
+        },
+        legacy_judge: None,
+        root: root.path().to_path_buf(),
+    };
+
+    assert!(!requires_host_workspace(&task));
+
+    task.workspace_seed.as_mut().unwrap().image = "example/seed@sha256:other".into();
+    assert!(requires_host_workspace(&task));
+
+    task.workspace_seed = None;
+    std::fs::create_dir_all(root.path().join("public/workspace")).unwrap();
+    assert!(requires_host_workspace(&task));
+
+    task.workspace_seed = Some(task::WorkspaceSeed {
+        image: task.work_image.clone(),
+        source_path: "/app".into(),
+        platform: None,
+    });
+    assert!(requires_host_workspace(&task));
+}
 
 #[test]
 fn model_judge_requires_an_explicit_local_route() {
@@ -10,6 +55,7 @@ fn model_judge_requires_an_explicit_local_route() {
     .unwrap();
     let config = config::LocalConfig {
         path: None,
+        bench_path: None,
         runtime: crate::runtime_selection::RuntimeSelection::bench_default().unwrap(),
         judge_model: None,
         codex_reasoning_effort: None,
@@ -88,6 +134,7 @@ fn model_candidate_game_and_task_owned_judge_run_end_to_end() {
         None,
         &config,
         &candidate_workspace,
+        None,
         Some(&game),
         &runtime_execution,
         "test-run",

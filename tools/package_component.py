@@ -3,6 +3,7 @@
 
 from __future__ import annotations
 
+import ast
 import hashlib
 import json
 import os
@@ -16,6 +17,8 @@ from pathlib import Path
 
 
 ROOT = Path(__file__).resolve().parents[1]
+EMBEDDED_RUNTIME_ASSETS = (ROOT / "runtime_assets" / "codex_connect_proxy.py",)
+
 
 def package_version() -> str:
     manifest = (ROOT / "Cargo.toml").read_text(encoding="utf-8")
@@ -36,11 +39,23 @@ def release_target() -> str:
     return f"{os_name}-{machine}"
 
 
+def validate_embedded_runtime_assets(binary: Path) -> None:
+    executable = binary.read_bytes()
+    for asset in EMBEDDED_RUNTIME_ASSETS:
+        source = asset.read_bytes()
+        ast.parse(source, filename=str(asset))
+        if source not in executable:
+            raise SystemExit(
+                f"required runtime asset is not embedded in component binary: {asset}"
+            )
+
+
 def main() -> None:
     version = package_version()
     target = release_target()
     subprocess.run(["cargo", "build", "--release", "--locked"], cwd=ROOT, check=True)
     binary = ROOT / "target" / "release" / "a3s-bench"
+    validate_embedded_runtime_assets(binary)
     package_name = f"a3s-bench-{version}-{target}"
     package_root = ROOT / "dist" / package_name
     if package_root.exists():

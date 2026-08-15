@@ -196,10 +196,10 @@ fn parse_score(source: &LegacyJudgeSource, output: &str) -> Result<f64> {
                 eprintln!("Judge produced no structured result; scoring 0.0");
                 return Ok(0.0);
             };
-            if !value.get("valid").and_then(Value::as_bool).unwrap_or(true) {
-                eprintln!("Judge marked result invalid; scoring 0.0");
-                return Ok(0.0);
-            }
+            anyhow::ensure!(
+                value.get("valid").and_then(Value::as_bool).unwrap_or(true),
+                "structured Judge marked result invalid"
+            );
             if let Some(score) = value.get("score").and_then(Value::as_f64) {
                 normalize_raw(source.rescale.as_ref(), score)
             } else {
@@ -653,17 +653,21 @@ mod tests {
     }
 
     #[test]
-    fn candidate_quality_failures_score_zero() {
+    fn missing_structured_result_scores_zero() {
         let source = structured_source();
         assert_eq!(parse_score(&source, "compiler error").unwrap(), 0.0);
-        assert_eq!(
-            parse_score(
-                &source,
-                ">>>>> Start Structured Result\n{\"valid\":false}\n>>>>> End Structured Result",
-            )
-            .unwrap(),
-            0.0
-        );
+    }
+
+    #[test]
+    fn invalid_structured_result_is_not_promoted_to_a_scoreable_result() {
+        let error = parse_score(
+            &structured_source(),
+            ">>>>> Start Structured Result\n{\"valid\":false,\"score\":0,\"metrics\":{\"grader_status\":\"codex_failed\"}}\n>>>>> End Structured Result",
+        )
+        .unwrap_err();
+        assert!(error
+            .to_string()
+            .contains("structured Judge marked result invalid"));
     }
 
     #[test]

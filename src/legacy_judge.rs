@@ -51,21 +51,22 @@ pub fn execute(
 
     let exit_code = output.status.code();
 
-    // Signal kills (OOM, SIGTERM) are infrastructure failures.  A timeout
-    // (exit_code 124) is NOT: the judge ran for the full descriptor timeout
-    // without crashing, meaning the candidate's code was too slow.  In that
-    // case we fall through to the normal scoring path.
-    if abnormal_judge_exit(exit_code) {
-        let snippet: String = raw.chars().take(4096).collect();
-        anyhow::bail!(
-            "Judge process terminated abnormally (exit_code: {:?}): {}",
-            exit_code,
-            snippet
-        );
-    }
-
-    if exit_code == Some(124) {
-        eprintln!("Judge exceeded descriptor timeout; scoring 0.0");
+    match classify_judge_exit(source, exit_code) {
+        JudgeExitClass::Completed => {}
+        JudgeExitClass::CandidateTimeout => {
+            eprintln!("Judge exceeded descriptor timeout; scoring 0.0");
+        }
+        JudgeExitClass::ModelGatewayTimeout => {
+            anyhow::bail!("model-backed Judge exceeded descriptor timeout");
+        }
+        JudgeExitClass::Abnormal => {
+            let snippet: String = raw.chars().take(4096).collect();
+            anyhow::bail!(
+                "Judge process terminated abnormally (exit_code: {:?}): {}",
+                exit_code,
+                snippet
+            );
+        }
     }
 
     // An ordinary exit without a structured result means the candidate's
@@ -125,8 +126,21 @@ fn configure_judge_container(command: &mut Command) {
     ]);
 }
 
-fn abnormal_judge_exit(exit_code: Option<i32>) -> bool {
-    matches!(exit_code, None | Some(137 | 143))
+#[derive(Debug, PartialEq, Eq)]
+enum JudgeExitClass {
+    Completed,
+    CandidateTimeout,
+    ModelGatewayTimeout,
+    Abnormal,
+}
+
+fn classify_judge_exit(source: &LegacyJudgeSource, exit_code: Option<i32>) -> JudgeExitClass {
+    match exit_code {
+        None | Some(137 | 143) => JudgeExitClass::Abnormal,
+        Some(124) if source.requires_model_gateway => JudgeExitClass::ModelGatewayTimeout,
+        Some(124) => JudgeExitClass::CandidateTimeout,
+        _ => JudgeExitClass::Completed,
+    }
 }
 
 fn configure_model_gateway(
@@ -215,6 +229,10 @@ fn parse_score(source: &LegacyJudgeSource, output: &str) -> Result<f64> {
             // candidate's code was too broken for the judge script to
             // complete), score 0.0 instead of failing the entire run.
             let Some(value) = extract_structured(output)? else {
+                anyhow::ensure!(
+                    !source.requires_model_gateway,
+                    "model-backed structured Judge produced no structured result"
+                );
                 eprintln!("Judge produced no structured result; scoring 0.0");
                 return Ok(0.0);
             };
@@ -681,6 +699,20 @@ mod tests {
     }
 
     #[test]
+    fn model_backed_structured_result_requires_a_result_marker() {
+        let mut source = structured_source();
+        source.requires_model_gateway = true;
+        let output = concat!(
+            "[codex-judge] model=glm-5.2, timeout=900s\n",
+            "[codex-judge] Running codex attempt 1/3...\nTerminated\n"
+        );
+        let error = parse_score(&source, output).unwrap_err();
+        assert!(error
+            .to_string()
+            .contains("model-backed structured Judge produced no structured result"));
+    }
+
+    #[test]
     fn invalid_structured_result_is_not_promoted_to_a_scoreable_result() {
         let error = parse_score(
             &structured_source(),
@@ -724,14 +756,30 @@ mod tests {
 
     #[test]
     fn judge_exit_classification_separates_candidate_and_infrastructure_failures() {
+        let source = structured_source();
         for exit_code in [None, Some(137), Some(143)] {
-            assert!(abnormal_judge_exit(exit_code));
+            assert_eq!(
+                classify_judge_exit(&source, exit_code),
+                JudgeExitClass::Abnormal
+            );
         }
         // Timeout (124) is not abnormal — it means the candidate was too slow.
-        assert!(!abnormal_judge_exit(Some(124)));
+        assert_eq!(
+            classify_judge_exit(&source, Some(124)),
+            JudgeExitClass::CandidateTimeout
+        );
         for exit_code in [Some(0), Some(1), Some(2)] {
-            assert!(!abnormal_judge_exit(exit_code));
+            assert_eq!(
+                classify_judge_exit(&source, exit_code),
+                JudgeExitClass::Completed
+            );
         }
+        let mut model_source = source;
+        model_source.requires_model_gateway = true;
+        assert_eq!(
+            classify_judge_exit(&model_source, Some(124)),
+            JudgeExitClass::ModelGatewayTimeout
+        );
     }
 
     #[test]

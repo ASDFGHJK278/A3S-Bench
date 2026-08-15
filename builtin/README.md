@@ -78,8 +78,8 @@ The short `quick_file_edit` task is available as a local conformance check. It
 exercises the complete run pipeline without requiring a long-horizon agent run.
 
 The 51 third-party task sources currently in this catalog are all quarantined
-for official results. Forty-seven are locally available as long-horizon tasks;
-four are locally blocked because their referenced OCI revisions have incomplete
+for official results. Forty-six are locally available as long-horizon tasks;
+five are locally blocked because their referenced OCI revisions have incomplete
 dependency, toolchain, locked-package, or scoring-asset contents.
 Their source records publish OCI tags and legacy evaluator commands, but do not
 provide enough evidence to admit those commands as A3S Judge Agent Assets. The

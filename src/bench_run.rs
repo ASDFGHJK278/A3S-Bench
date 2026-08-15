@@ -267,10 +267,6 @@ fn execute_candidate(
 ) -> Result<CandidateRun> {
     if candidate.protocol == asset::CandidateProtocol::CodexExec {
         anyhow::ensure!(
-            game.is_none(),
-            "Codex Candidate does not support game Tasks"
-        );
-        anyhow::ensure!(
             runtime_execution.provider == "docker",
             "containerized Codex requires the Docker Runtime"
         );
@@ -284,6 +280,7 @@ fn execute_candidate(
         let log_dir = state_root.join("runs").join(run_id);
         crate::state_fs::secure_directory(&log_dir)?;
         let event_log = log_dir.join("codex-events.jsonl");
+        let game_url = game.map(game_judge::GameSession::url);
         let request = crate::codex_candidate::CodexExecutionRequest {
             task,
             package: codex_package,
@@ -293,6 +290,14 @@ fn execute_candidate(
             task_prompt: &prompt,
             model,
             reasoning_effort,
+            game_network: game.map(|session| {
+                (
+                    session.network(),
+                    game_url
+                        .as_deref()
+                        .expect("game URL accompanies a game session"),
+                )
+            }),
             timeout_sec: task.candidate_timeout_sec,
             state_root,
             event_log: Some(&event_log),

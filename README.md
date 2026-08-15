@@ -156,6 +156,13 @@ Task-owned Judge would change the evaluation identity.
 The imported long-horizon catalog is locally runnable but quarantined for
 official admission. Catalog metadata never promotes a local result.
 
+For imported legacy Judges using the `pytest_v` parser, a reported
+`TOTAL_SCORE` is the authoritative raw score and is converted through the
+Task's locked rescale rule. Only when `TOTAL_SCORE` is absent does Bench use
+`selection_hint`: `pass_rate_first` falls back to the pytest pass ratio, while
+`score_first` and `valid_then_score` fall back to zero. An unsupported hint is
+rejected instead of silently selecting another metric.
+
 ```bash
 a3s bench list
 a3s bench info quick_file_edit
@@ -261,6 +268,16 @@ paths are excluded. Bench does not pass `OPENAI_API_KEY` or `CODEX_API_KEY`.
 To match EdgeBench, Codex's internal sandbox is disabled, so the outer Docker
 container is the security boundary: model tools can read files visible inside
 that container, including the copied `auth.json`.
+
+The Codex Candidate also supports interactive game Tasks. For a restricted
+game run, it retains the private internal network and proxy used only for the
+Codex control plane, then attaches the work container to the separate internal
+network owned by the Task's `GameSession`. Bench passes `GAME_SERVER_URL` and
+sets both `NO_PROXY` forms to exactly the game-container host. The Candidate can
+start and play through `POST /new` and `POST /step`, inspect `GET /status`, and
+optionally call `POST /close`. Codex cleanup owns only its containers, private
+network, and volumes; the borrowed game server and network remain owned and
+cleaned by `GameSession`.
 
 The Codex Candidate uses CandidateLock v3. Its `product` identity records the
 Codex package name, version, target triple, and artifact-set digest; the lock

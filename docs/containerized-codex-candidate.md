@@ -22,11 +22,13 @@ outer network policy follows the locked Task requirement:
 - `network_need = "public_internet"` keeps the work container on Docker
   `bridge`. No proxy sidecar or private network is created, so Codex tools have
   the general egress the Task requested.
-- `network_need = "none"` attaches the work container only to a per-run Docker
-  `--internal` network. A proxy sidecar joins both that internal network and
-  `bridge`, and the Candidate's proxy variables name the sidecar. This exposes
-  only the restricted Codex control-plane tunnel; it does not grant tools
-  general internet access.
+- `network_need = "none"` attaches the work container to a per-run Docker
+  `--internal` control-plane network. A proxy sidecar joins both that internal
+  network and `bridge`, and the Candidate's proxy variables name the sidecar.
+  This exposes only the restricted Codex control-plane tunnel; it does not
+  grant tools general internet access. For an interactive game Task, the work
+  container additionally borrows the separate `--internal` network owned by
+  the Task's `GameSession`; the proxy sidecar is not attached to that network.
 
 The sidecar is created on the internal network, which has no default gateway,
 and is then attached to `bridge`. That later public attachment naturally becomes
@@ -54,6 +56,17 @@ CONNECT authority. Missing, malformed, duplicate, or different SNI closes the
 connection before DNS resolution or any upstream socket is opened. The
 validated ClientHello bytes are retained and become the first bytes relayed to
 the approved upstream.
+
+For a game Task, Bench validates the protected game URL as
+`http://<game-container>:8000`, passes it as `GAME_SERVER_URL`, and sets both
+`NO_PROXY` and `no_proxy` to exactly `<game-container>`. No suffix, port, proxy
+host, or unrelated destination is included. Spawned Codex shells retain these
+two no-proxy variables so their HTTP client can reach the game server directly;
+the other proxy variables remain excluded from spawned shells. The injected
+game completion contract describes `POST /new` with `{}`, `POST /step` with an
+`action`, `GET /status`, and optional `POST /close`. The Judge scores the
+session's peak score, and a later `POST /new` resets the current score, peak,
+and move count.
 
 The proxy bounds request headers to 16 KiB and 100 lines, DNS plus upstream
 connection establishment to ten seconds each, inactive tunnels to five
@@ -207,6 +220,13 @@ dependencies. Only after every owned Docker resource is confirmed absent does
 `CodexRunGuard` delete the private host authentication home. Otherwise it
 retains the marked home for stale recovery. The same rule applies to success,
 failure, timeout, and best-effort drop paths.
+
+The `GameSession` network is borrowed, not a Codex-owned resource: Codex neither
+labels it as owned nor includes it in normal cleanup or stale-resource sweeps.
+Removing the Codex work container releases its membership. `GameSession`
+retains responsibility for stopping the protected game server and removing its
+internal network after judging, so the two lifecycles cannot delete one
+another's resources.
 
 Before staging authentication for a new Codex run, Bench records a common run
 id, host boot id, Bench PID, Linux `/proc/<pid>/stat` start ticks, and creation

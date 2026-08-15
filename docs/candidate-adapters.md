@@ -119,6 +119,18 @@ directly and does not create the restricted proxy sidecar. See
 [Containerized Codex Candidate](containerized-codex-candidate.md) for the exact
 allowlist and limits.
 
+Interactive game Tasks are supported without widening this control-plane
+exception. Bench keeps the Codex work container on its private internal
+control-plane network and additionally attaches that container to the internal
+network owned by the Task's `GameSession`. It passes
+`GAME_SERVER_URL=http://<game-container>:8000`; both `NO_PROXY` and `no_proxy`
+contain exactly `<game-container>`, so game traffic bypasses the CONNECT proxy
+without exempting any other destination. The Candidate prompt documents
+`POST /new`, `POST /step`, `GET /status`, and optional `POST /close`. The Codex
+lifecycle owns and removes only Codex containers, its control-plane network,
+and its volumes. It merely borrows the game network; `GameSession` retains
+ownership of the game server and network.
+
 Select the Codex model with `--model` and reasoning effort with
 `--reasoning-effort`. Valid efforts are `none`, `minimal`, `low`, `medium`,
 `high`, and `xhigh`; omitted values leave Codex's defaults selected. Both

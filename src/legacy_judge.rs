@@ -211,18 +211,27 @@ fn parse_score(source: &LegacyJudgeSource, output: &str) -> Result<f64> {
             }
         }
         "score_sum" => {
-            let expression =
-                Regex::new(r"TOTAL_SCORE\s+(?:inf|([0-9]+(?:\.[0-9]+)?(?:[eE][+-]?[0-9]+)?))")?;
-            let raw = expression
-                .captures(output)
-                .and_then(|captures| captures.get(1))
-                .and_then(|value| value.as_str().parse::<f64>().ok())
-                .unwrap_or(0.0);
+            let raw = extract_total_score(output)?.unwrap_or(0.0);
             normalize_raw(source.rescale.as_ref(), raw)
         }
-        "pytest_v" => pytest_ratio(output),
+        "pytest_v" => match extract_total_score(output)? {
+            Some(raw) => normalize_raw(source.rescale.as_ref(), raw),
+            None => match source.selection_hint.as_str() {
+                "pass_rate_first" => pytest_ratio(output),
+                "score_first" | "valid_then_score" => Ok(0.0),
+                value => anyhow::bail!("unsupported legacy Judge selection policy {value:?}"),
+            },
+        },
         value => anyhow::bail!("unsupported legacy Judge parser {value:?}"),
     }
+}
+
+fn extract_total_score(output: &str) -> Result<Option<f64>> {
+    let expression = Regex::new(r"TOTAL_SCORE\s+(inf|[0-9]+(?:\.[0-9]+)?(?:[eE][+-]?[0-9]+)?)")?;
+    Ok(expression
+        .captures(output)
+        .and_then(|captures| captures.get(1))
+        .and_then(|value| value.as_str().parse::<f64>().ok()))
 }
 
 fn extract_structured(output: &str) -> Result<Option<Value>> {
@@ -494,11 +503,141 @@ mod tests {
             parser: "structured_json".into(),
             workspace_source_path: "/workspace".into(),
             rescale: None,
+            selection_hint: "score_first".into(),
             platform: None,
             game_server_command: None,
             requires_model_gateway: false,
             timeout_sec: 60,
         }
+    }
+
+    fn pytest_v_source(rescale: Option<Value>) -> LegacyJudgeSource {
+        LegacyJudgeSource {
+            parser: "pytest_v".into(),
+            rescale,
+            selection_hint: "pass_rate_first".into(),
+            ..structured_source()
+        }
+    }
+
+    fn score_sum_source(rescale: Option<Value>) -> LegacyJudgeSource {
+        LegacyJudgeSource {
+            parser: "score_sum".into(),
+            rescale,
+            ..structured_source()
+        }
+    }
+
+    #[test]
+    fn total_score_extraction_distinguishes_missing_zero_scientific_and_infinite() {
+        assert_eq!(extract_total_score("no score here").unwrap(), None);
+        assert_eq!(extract_total_score("TOTAL_SCORE 0").unwrap(), Some(0.0));
+        assert_eq!(
+            extract_total_score("TOTAL_SCORE 3.3e-9").unwrap(),
+            Some(3.3e-9)
+        );
+        assert_eq!(
+            extract_total_score("TOTAL_SCORE 1E+2").unwrap(),
+            Some(100.0)
+        );
+        assert_eq!(
+            extract_total_score("TOTAL_SCORE inf").unwrap(),
+            Some(f64::INFINITY)
+        );
+    }
+
+    #[test]
+    fn pytest_v_uses_rescaled_total_score_even_when_some_tests_fail() {
+        let source = pytest_v_source(Some(
+            serde_json::json!({"kind":"linear","lower":0.0,"upper":100.0}),
+        ));
+        let output = "=== 4 passed, 1 failed in 0.28s ===\nTOTAL_SCORE 50.0\n";
+        assert_eq!(parse_score(&source, output).unwrap(), 0.5);
+    }
+
+    #[test]
+    fn pytest_v_applies_non_linear_rescale_to_total_score() {
+        let source = pytest_v_source(Some(serde_json::json!({
+            "kind":"log_anchor",
+            "anchor_raw":14.155,
+            "anchor_score":43.0
+        })));
+        let output = "=== 1 passed in 0.01s ===\nTOTAL_SCORE 14.155\n";
+        assert!((parse_score(&source, output).unwrap() - 0.43).abs() < 0.001);
+    }
+
+    #[test]
+    fn pytest_v_distinguishes_explicit_zero_from_missing_total_score() {
+        let source = pytest_v_source(Some(
+            serde_json::json!({"kind":"linear","lower":0.0,"upper":100.0}),
+        ));
+        let summary = "=== 4 passed, 1 failed in 0.28s ===";
+        assert_eq!(parse_score(&source, summary).unwrap(), 0.8);
+        assert_eq!(
+            parse_score(&source, &format!("{summary}\nTOTAL_SCORE 0\n")).unwrap(),
+            0.0
+        );
+    }
+
+    #[test]
+    fn pytest_v_missing_total_score_falls_back_at_full_pass_rate() {
+        let source = pytest_v_source(Some(
+            serde_json::json!({"kind":"linear","lower":0.0,"upper":100.0}),
+        ));
+        assert_eq!(
+            parse_score(&source, "=== 2 passed in 0.01s ===").unwrap(),
+            1.0
+        );
+    }
+
+    #[test]
+    fn pytest_v_missing_total_score_is_zero_for_score_first() {
+        let mut source = pytest_v_source(Some(
+            serde_json::json!({"kind":"linear","lower":0.0,"upper":100.0}),
+        ));
+        source.selection_hint = "score_first".into();
+        assert_eq!(
+            parse_score(&source, "=== 4 passed, 1 failed in 0.28s ===").unwrap(),
+            0.0
+        );
+    }
+
+    #[test]
+    fn pytest_v_missing_total_score_is_zero_for_valid_then_score() {
+        let mut source = pytest_v_source(None);
+        source.selection_hint = "valid_then_score".into();
+        assert_eq!(
+            parse_score(&source, "=== 2 passed in 0.01s ===").unwrap(),
+            0.0
+        );
+    }
+
+    #[test]
+    fn pytest_v_rejects_unknown_selection_policy() {
+        let mut source = pytest_v_source(None);
+        source.selection_hint = "unknown".into();
+        let error = parse_score(&source, "=== 2 passed in 0.01s ===").unwrap_err();
+        assert!(error
+            .to_string()
+            .contains("unsupported legacy Judge selection policy"));
+    }
+
+    #[test]
+    fn infinite_total_score_normalizes_to_zero_for_both_legacy_parsers() {
+        let pytest = pytest_v_source(None);
+        let score_sum = score_sum_source(None);
+        let output = "=== 1 passed in 0.01s ===\nTOTAL_SCORE inf\n";
+        assert_eq!(parse_score(&pytest, output).unwrap(), 0.0);
+        assert_eq!(parse_score(&score_sum, output).unwrap(), 0.0);
+    }
+
+    #[test]
+    fn score_sum_reuses_total_score_extraction() {
+        let source = score_sum_source(Some(
+            serde_json::json!({"kind":"linear","lower":0.0,"upper":1.0}),
+        ));
+        assert_eq!(parse_score(&source, "TOTAL_SCORE 2.5e-1").unwrap(), 0.25);
+        assert_eq!(parse_score(&source, "no score").unwrap(), 0.0);
     }
 
     #[test]

@@ -55,6 +55,7 @@ pub struct CodexExecutionRequest<'a> {
     pub task_prompt: &'a str,
     pub model: Option<&'a str>,
     pub reasoning_effort: Option<&'a str>,
+    pub game_network: Option<(&'a str, &'a str)>,
     pub timeout_sec: u64,
     pub state_root: &'a Path,
     pub event_log: Option<&'a Path>,
@@ -571,10 +572,7 @@ pub fn execute(request: CodexExecutionRequest<'_>) -> Result<CodexOutcome> {
     private_home.prepare_for_container_copy()?;
     let container_workspace = container_workspace(request.task)?;
     let guard = CodexRunGuard::new(resources.clone(), private_home);
-    let prompt = format!(
-        "{}\n\n# Benchmark task\n\n{}\n\nWork only in the supplied workspace and complete the task.",
-        request.instructions, request.task_prompt
-    );
+    let prompt = candidate_prompt(&request);
     let result = (|| -> Result<CodexOutcome> {
         let mut create =
             build_codex_run_command(&request, &prompt, &resources, &container_workspace)?;
@@ -615,6 +613,9 @@ pub fn execute(request: CodexExecutionRequest<'_>) -> Result<CodexOutcome> {
         );
         let container_id = owned_container_id(&resources.main_container)?
             .ok_or_else(|| anyhow::anyhow!("Codex container disappeared during staging"))?;
+        if let Some((network, _)) = request.game_network {
+            connect_candidate_to_game_network(&resources, &container_id, network)?;
+        }
         if restricted_network {
             start_proxy_sidecar(&resources)?;
         }
@@ -698,7 +699,8 @@ fn build_codex_run_command(
         request.seed_workspace.is_some(),
     )?;
     add_codex_environment(&mut command, request.package)?;
-    add_proxy_environment(&mut command, resources);
+    add_proxy_environment(&mut command, resources, request.game_network)?;
+    add_game_environment(&mut command, request.game_network)?;
     request.package.verify_for_mount()?;
     command
         .arg("--mount")
@@ -718,6 +720,27 @@ fn build_codex_run_command(
         .arg(&request.task.work_image)
         .args(codex_argv(request, prompt, container_workspace));
     Ok(command)
+}
+
+fn candidate_prompt(request: &CodexExecutionRequest<'_>) -> String {
+    let completion_contract = if request.game_network.is_some() {
+        r#"# Interactive game channel
+
+This task is completed by playing the protected game, not by editing workspace files. The game server base URL is available in `GAME_SERVER_URL`. Use the shell and an HTTP client to:
+
+- send `POST /new` with `{}` to start a game;
+- send `POST /step` with `{"action":"<game command>"}` for each move;
+- send `GET /status` to inspect the current state; and
+- optionally send `POST /close` with `{}` after the final move.
+
+The Judge scores the current session's `peak_score`. Calling `/new` resets the current score, peak score, and move count, so finish with the strongest run you want scored. Continue issuing game commands until you have made a serious attempt to maximize the score."#
+    } else {
+        "Work only in the supplied workspace and complete the task."
+    };
+    format!(
+        "{}\n\n# Benchmark task\n\n{}\n\n{}",
+        request.instructions, request.task_prompt, completion_contract
+    )
 }
 
 fn stage_container_inputs(
@@ -822,6 +845,11 @@ fn codex_argv(
     prompt: &str,
     container_workspace: &str,
 ) -> Vec<String> {
+    let shell_environment_exclude = if request.game_network.is_some() {
+        r#"shell_environment_policy.exclude=["HTTP_PROXY","HTTPS_PROXY","ALL_PROXY","http_proxy","https_proxy","all_proxy","CODEX_HOME","CODEX_CODE_MODE_HOST_PATH"]"#
+    } else {
+        r#"shell_environment_policy.exclude=["HTTP_PROXY","HTTPS_PROXY","ALL_PROXY","NO_PROXY","http_proxy","https_proxy","all_proxy","no_proxy","CODEX_HOME","CODEX_CODE_MODE_HOST_PATH"]"#
+    };
     let mut argv = vec![
         "exec".into(),
         "--dangerously-bypass-approvals-and-sandbox".into(),
@@ -839,7 +867,7 @@ fn codex_argv(
         "-c".into(),
         "shell_environment_policy.ignore_default_excludes=false".into(),
         "-c".into(),
-        r#"shell_environment_policy.exclude=["HTTP_PROXY","HTTPS_PROXY","ALL_PROXY","NO_PROXY","http_proxy","https_proxy","all_proxy","no_proxy","CODEX_HOME","CODEX_CODE_MODE_HOST_PATH"]"#.into(),
+        shell_environment_exclude.into(),
     ];
     if let Some(model) = request.model {
         argv.extend(["--model".into(), model.into()]);
@@ -888,10 +916,52 @@ fn stage_proxy_runtime_asset(state_root: &Path) -> Result<PathBuf> {
     Ok(script)
 }
 
-fn add_proxy_environment(command: &mut Command, resources: &CodexResources) {
-    let Some(proxy) = resources.proxy_container.as_deref() else {
-        return;
+fn game_server_host<'a>(game_network: Option<(&str, &'a str)>) -> Result<Option<&'a str>> {
+    let Some((_, url)) = game_network else {
+        return Ok(None);
     };
+    let host = url
+        .strip_prefix("http://")
+        .and_then(|authority| authority.strip_suffix(":8000"))
+        .ok_or_else(|| {
+            anyhow::anyhow!(
+                "Codex game server URL must use http, the protected container name, and port 8000"
+            )
+        })?;
+    anyhow::ensure!(
+        !host.is_empty()
+            && host.len() <= 253
+            && host.starts_with("a3s-bench-game-")
+            && host
+                .as_bytes()
+                .first()
+                .is_some_and(u8::is_ascii_alphanumeric)
+            && host
+                .bytes()
+                .all(|byte| { byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_' | b'.') }),
+        "Codex game server URL contains an invalid container name"
+    );
+    Ok(Some(host))
+}
+
+fn add_game_environment(command: &mut Command, game_network: Option<(&str, &str)>) -> Result<()> {
+    let Some((_, url)) = game_network else {
+        return Ok(());
+    };
+    game_server_host(game_network)?;
+    command.arg("--env").arg(format!("GAME_SERVER_URL={url}"));
+    Ok(())
+}
+
+fn add_proxy_environment(
+    command: &mut Command,
+    resources: &CodexResources,
+    game_network: Option<(&str, &str)>,
+) -> Result<()> {
+    let Some(proxy) = resources.proxy_container.as_deref() else {
+        return Ok(());
+    };
+    let no_proxy = game_server_host(game_network)?.unwrap_or_default();
     let endpoint = format!("http://{proxy}:{PROXY_PORT}");
     for name in [
         "HTTP_PROXY",
@@ -903,7 +973,12 @@ fn add_proxy_environment(command: &mut Command, resources: &CodexResources) {
     ] {
         command.arg("--env").arg(format!("{name}={endpoint}"));
     }
-    command.args(["--env", "NO_PROXY=", "--env", "no_proxy="]);
+    command
+        .arg("--env")
+        .arg(format!("NO_PROXY={no_proxy}"))
+        .arg("--env")
+        .arg(format!("no_proxy={no_proxy}"));
+    Ok(())
 }
 
 fn ensure_proxy_helper_image() -> Result<()> {
@@ -1426,6 +1501,75 @@ fn create_proxy_container(resources: &CodexResources) -> Result<String> {
     );
     owned_container_id(proxy)?
         .ok_or_else(|| anyhow::anyhow!("Codex CONNECT proxy disappeared after creation"))
+}
+
+fn build_game_network_connect_command(network: &str, container_id: &str) -> Command {
+    let mut command = Command::new("docker");
+    command.args(["network", "connect", network, container_id]);
+    command
+}
+
+fn docker_network_is_internal(network: &str) -> Result<bool> {
+    let mut command = Command::new("docker");
+    command
+        .args(["network", "inspect", "--format", "{{.Internal}}"])
+        .arg(network);
+    let (output, timed_out) = output_with_timeout(&mut command, CONTAINER_CLEANUP_TIMEOUT)
+        .context("could not inspect the game network")?;
+    anyhow::ensure!(!timed_out, "game network inspection timed out");
+    anyhow::ensure!(
+        output.status.success() && !output.stdout_truncated && !output.stderr_truncated,
+        "game network inspection failed: {}",
+        cleanup_diagnostics(&output)
+    );
+    match String::from_utf8_lossy(&output.stdout).trim() {
+        "true" => Ok(true),
+        "false" => Ok(false),
+        value => anyhow::bail!("Docker returned invalid game network policy {value:?}"),
+    }
+}
+
+fn connect_candidate_to_game_network(
+    resources: &CodexResources,
+    container_id: &str,
+    network: &str,
+) -> Result<()> {
+    anyhow::ensure!(
+        !network.is_empty()
+            && network
+                .bytes()
+                .all(|byte| { byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_' | b'.') }),
+        "Codex game network name is invalid"
+    );
+    anyhow::ensure!(
+        docker_network_is_internal(network)?,
+        "refusing to attach containerized Codex to a non-internal game network"
+    );
+    let mut command = build_game_network_connect_command(network, container_id);
+    let (output, timed_out) = output_with_timeout(&mut command, CONTAINER_STAGING_TIMEOUT)
+        .context("could not attach containerized Codex to the game network")?;
+    if timed_out {
+        resources.mark_pending_mutation();
+    }
+    anyhow::ensure!(
+        !timed_out,
+        "containerized Codex game network attachment timed out"
+    );
+    anyhow::ensure!(
+        !output.stdout_truncated && !output.stderr_truncated,
+        "containerized Codex game network attachment diagnostics were truncated"
+    );
+    let attached = container_has_network(container_id, network)?;
+    anyhow::ensure!(
+        output.status.success() || attached,
+        "could not attach containerized Codex to the game network: {}",
+        cleanup_diagnostics(&output)
+    );
+    anyhow::ensure!(
+        attached,
+        "containerized Codex is not attached to the game network"
+    );
+    Ok(())
 }
 
 fn build_proxy_bridge_connect_command(proxy_id: &str) -> Command {
@@ -2156,6 +2300,7 @@ mod tests {
             task_prompt: "task",
             model: Some("gpt-5.6-luna"),
             reasoning_effort: Some("none"),
+            game_network: None,
             timeout_sec: 1,
             state_root: home.path(),
             event_log: None,
@@ -2238,6 +2383,7 @@ mod tests {
             resources.proxy_container.as_deref().unwrap()
         );
         assert!(args.iter().any(|arg| arg == &proxy_url));
+        assert!(!args.iter().any(|arg| arg.starts_with("GAME_SERVER_URL=")));
         assert!(args.contains(&"--ephemeral".into()));
         assert!(args.contains(&"--json".into()));
         assert!(args.contains(&"--skip-git-repo-check".into()));
@@ -2299,6 +2445,59 @@ mod tests {
                 || arg.contains("API_KEY")
         }));
 
+        request.game_network = Some((
+            "a3s-bench-game-test",
+            "http://a3s-bench-game-container:8000",
+        ));
+        let game_command =
+            build_codex_run_command(&request, "game prompt", &resources, "/app").unwrap();
+        let game_args = game_command
+            .get_args()
+            .map(|arg| arg.to_string_lossy().into_owned())
+            .collect::<Vec<_>>();
+        assert!(game_args.windows(2).any(|pair| {
+            pair == [
+                "--env",
+                "GAME_SERVER_URL=http://a3s-bench-game-container:8000",
+            ]
+        }));
+        assert!(game_args
+            .windows(2)
+            .any(|pair| { pair == ["--env", "NO_PROXY=a3s-bench-game-container"] }));
+        assert!(game_args
+            .windows(2)
+            .any(|pair| { pair == ["--env", "no_proxy=a3s-bench-game-container"] }));
+        assert!(game_args
+            .windows(2)
+            .any(|pair| pair == ["--network", resources.internal_network.as_deref().unwrap()]));
+        assert!(!game_args
+            .windows(2)
+            .any(|pair| pair == ["--network", "a3s-bench-game-test"]));
+        let game_prompt = candidate_prompt(&request);
+        assert!(game_prompt.contains("POST /new"));
+        assert!(game_prompt.contains("POST /step"));
+        assert!(game_prompt.contains("Calling `/new` resets"));
+        assert!(game_prompt.contains("not by editing workspace files"));
+        let game_config_overrides = game_args
+            .windows(2)
+            .filter(|pair| pair[0] == "-c")
+            .map(|pair| pair[1].as_str())
+            .collect::<Vec<_>>();
+        assert!(game_config_overrides.contains(
+            &r#"shell_environment_policy.exclude=["HTTP_PROXY","HTTPS_PROXY","ALL_PROXY","http_proxy","https_proxy","all_proxy","CODEX_HOME","CODEX_CODE_MODE_HOST_PATH"]"#
+        ));
+        assert!(!game_config_overrides
+            .iter()
+            .any(|value| value.contains("NO_PROXY") || value.contains("no_proxy")));
+        let connect = build_game_network_connect_command("game-network", "candidate-id");
+        assert_eq!(
+            connect
+                .get_args()
+                .map(|arg| arg.to_string_lossy().into_owned())
+                .collect::<Vec<_>>(),
+            ["network", "connect", "game-network", "candidate-id"]
+        );
+        request.game_network = None;
         request.seed_workspace = Some(&workspace);
         let seeded_resources = CodexResources::new("a3s-bench-codex-seeded-test".into(), true);
         let seeded =
@@ -2402,7 +2601,7 @@ mod tests {
             false,
         )
         .unwrap();
-        add_proxy_environment(&mut public_command, &public_resources);
+        add_proxy_environment(&mut public_command, &public_resources, None).unwrap();
         let public_args = public_command
             .get_args()
             .map(|arg| arg.to_string_lossy().into_owned())
@@ -2424,6 +2623,25 @@ mod tests {
         assert_eq!(capture.bytes, b"0123");
         assert!(!capture.truncated);
     }
+
+    #[test]
+    fn game_server_host_accepts_only_the_protected_http_contract() {
+        assert_eq!(
+            game_server_host(Some(("game-network", "http://a3s-bench-game-123:8000"))).unwrap(),
+            Some("a3s-bench-game-123")
+        );
+        assert_eq!(game_server_host(None).unwrap(), None);
+        for invalid in [
+            "https://a3s-bench-game-123:8000",
+            "http://a3s-bench-game-123:8001",
+            "http://a3s-bench-game-123:8000/path",
+            "http://user@a3s-bench-game-123:8000",
+            "http://127.0.0.1:8000",
+        ] {
+            assert!(game_server_host(Some(("game-network", invalid))).is_err());
+        }
+    }
+
     #[test]
     fn proxy_sidecar_is_hardened_and_has_no_candidate_mounts() {
         let resources = CodexResources::new("a3s-bench-codex-proxy-test".into(), true);
@@ -2607,6 +2825,187 @@ print("ok")
         let cleanup = remove_resources(&resources);
         outcome.unwrap();
         cleanup.unwrap();
+    }
+
+    #[test]
+    #[ignore = "requires Docker, imported Anchorhead images, the proxy helper, and public DNS/TLS"]
+    fn docker_codex_candidate_reaches_borrowed_game_network() {
+        let task = crate::task::load_local(
+            &Path::new(env!("CARGO_MANIFEST_DIR")).join("builtin/tasks/anchorhead_text_adventure"),
+        )
+        .unwrap();
+        let source = task.legacy_judge.as_ref().unwrap();
+        let state = tempfile::tempdir().unwrap();
+        let game = crate::game_judge::GameSession::start(source, state.path()).unwrap();
+        let resources = CodexResources::new(container_name(), true);
+        let game_url = game.url();
+        let outcome = (|| -> Result<()> {
+            ensure_proxy_helper_image()?;
+            create_internal_network(&resources)?;
+            for volume in resources.volumes() {
+                create_volume(&resources, volume)?;
+            }
+            let asset = stage_proxy_runtime_asset(state.path())?;
+            let proxy_volume = resources.proxy_volume.as_deref().unwrap();
+            let mut stage = Command::new("docker");
+            stage.args([
+                "create",
+                "--pull",
+                "never",
+                "--name",
+                &resources.staging_container,
+            ]);
+            resources
+                .metadata()
+                .add_labels(&mut stage, &resources.staging_container);
+            stage
+                .arg("--mount")
+                .arg(format!(
+                    "type=volume,src={proxy_volume},dst={PROXY_STAGING_PARENT},volume-nocopy"
+                ))
+                .args([PROXY_HELPER_IMAGE, "/bin/true"]);
+            let (output, timed_out) = output_with_timeout(&mut stage, CONTAINER_STAGING_TIMEOUT)?;
+            anyhow::ensure!(!timed_out, "Docker game proxy staging timed out");
+            anyhow::ensure!(
+                output.status.success() && !output.stdout_truncated && !output.stderr_truncated,
+                "Docker game proxy staging failed: {}",
+                cleanup_diagnostics(&output)
+            );
+            let staging_id = owned_container_id(&resources.staging_container)?
+                .ok_or_else(|| anyhow::anyhow!("Docker game proxy staging disappeared"))?;
+            copy_tree_into_container(
+                &staging_id,
+                &asset,
+                &format!("{PROXY_STAGING_PARENT}/{PROXY_SCRIPT_NAME}"),
+            )?;
+            start_proxy_sidecar(&resources)?;
+
+            let script = r#"
+import json, os, socket, ssl, sys, urllib.request
+proxy = sys.argv[1]
+game_host = os.environ["GAME_SERVER_URL"].removeprefix("http://").removesuffix(":8000")
+if os.environ.get("NO_PROXY") != game_host or os.environ.get("no_proxy") != game_host:
+    raise SystemExit("game NO_PROXY contract is missing")
+
+try:
+    direct = socket.create_connection(("1.1.1.1", 443), 2)
+except OSError:
+    pass
+else:
+    direct.close()
+    raise SystemExit("direct public socket unexpectedly succeeded")
+
+def connect(authority):
+    sock = socket.create_connection((proxy, 3128), 3)
+    request = (
+        f"CONNECT {authority}:443 HTTP/1.1\r\n"
+        f"Host: {authority}:443\r\n\r\n"
+    ).encode("ascii")
+    sock.sendall(request)
+    response = b""
+    while b"\r\n\r\n" not in response and len(response) < 4096:
+        response += sock.recv(4096)
+    return sock, response
+
+denied, response = connect("example.com")
+denied.close()
+if not response.startswith(b"HTTP/1.1 403"):
+    raise SystemExit(f"denied CONNECT returned {response[:64]!r}")
+
+allowed, response = connect("api.openai.com")
+if not response.startswith(b"HTTP/1.1 200"):
+    raise SystemExit(f"allowed CONNECT returned {response[:64]!r}")
+context = ssl._create_unverified_context()
+tls = context.wrap_socket(allowed, server_hostname="api.openai.com")
+tls.do_handshake()
+tls.close()
+
+def post(path, payload):
+    request = urllib.request.Request(
+        os.environ["GAME_SERVER_URL"] + path,
+        data=json.dumps(payload).encode(),
+        headers={"Content-Type": "application/json"},
+    )
+    return json.loads(urllib.request.urlopen(request, timeout=5).read())
+
+post("/new", {})
+print(json.dumps(post("/step", {"action": "look"})))
+"#;
+            let mut create = Command::new("docker");
+            create.args([
+                "create",
+                "--pull",
+                "never",
+                "--name",
+                &resources.main_container,
+                "--read-only",
+                "--cap-drop",
+                "ALL",
+                "--security-opt",
+                "no-new-privileges",
+            ]);
+            resources
+                .metadata()
+                .add_labels(&mut create, &resources.main_container);
+            create.args(crate::runtime_profile::WORK_DOCKER_LIMITS);
+            create.args(["--network", resources.internal_network.as_deref().unwrap()]);
+            add_proxy_environment(&mut create, &resources, Some((game.network(), &game_url)))?;
+            add_game_environment(&mut create, Some((game.network(), &game_url)))?;
+            if let Some(platform) = task.work_platform.as_deref() {
+                create.args(["--platform", platform]);
+            }
+            create.arg(&task.work_image).args([
+                "python3",
+                "-c",
+                script,
+                resources.proxy_container.as_deref().unwrap(),
+            ]);
+            let (output, timed_out) = output_with_timeout(&mut create, CONTAINER_STAGING_TIMEOUT)?;
+            anyhow::ensure!(!timed_out, "Docker game probe creation timed out");
+            anyhow::ensure!(
+                output.status.success() && !output.stdout_truncated && !output.stderr_truncated,
+                "Docker game probe creation failed: {}",
+                cleanup_diagnostics(&output)
+            );
+            let container_id = owned_container_id(&resources.main_container)?
+                .ok_or_else(|| anyhow::anyhow!("Docker game probe disappeared"))?;
+            connect_candidate_to_game_network(&resources, &container_id, game.network())?;
+            anyhow::ensure!(
+                container_has_network(
+                    &container_id,
+                    resources.internal_network.as_deref().unwrap()
+                )?,
+                "Docker game probe lost its Codex network"
+            );
+            anyhow::ensure!(
+                container_has_network(&container_id, game.network())?,
+                "Docker game probe did not join the borrowed game network"
+            );
+            let mut start = Command::new("docker");
+            start.args(["start", "--attach", &container_id]);
+            let (output, timed_out) = output_with_timeout(&mut start, Duration::from_secs(45))?;
+            anyhow::ensure!(!timed_out, "Docker game probe timed out");
+            anyhow::ensure!(
+                output.status.success() && !output.stdout_truncated && !output.stderr_truncated,
+                "Docker game probe failed: {}",
+                cleanup_diagnostics(&output)
+            );
+            let step: Value = serde_json::from_slice(&output.stdout)?;
+            anyhow::ensure!(
+                step.get("moves").and_then(Value::as_u64) == Some(1),
+                "Docker game probe did not record one move"
+            );
+            Ok(())
+        })();
+        let cleanup = remove_resources(&resources);
+        outcome.unwrap();
+        cleanup.unwrap();
+        assert!(docker_network_is_internal(game.network()).unwrap());
+        let result = game.finish(&task, source).unwrap();
+        assert_eq!(
+            result.diagnostics.get("moves").and_then(Value::as_u64),
+            Some(1)
+        );
     }
 
     #[test]

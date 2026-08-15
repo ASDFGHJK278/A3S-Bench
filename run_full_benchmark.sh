@@ -3,11 +3,11 @@ set -uo pipefail
 
 cd "$(dirname "$0")"
 PROJECT_DIR="$PWD"
-export A3S_BENCH_INSTALL_DIR="${A3S_BENCH_INSTALL_DIR:-$PROJECT_DIR/target/debug}"
 
 CANDIDATE="${A3S_BENCH_CANDIDATE:-codex}"
 MODEL="${A3S_BENCH_MODEL:-}"
 OUTPUT_ROOT="${A3S_BENCH_OUTPUT_DIR:-$PROJECT_DIR/.test-tmp}"
+CODEX_PROXY_HELPER_IMAGE="python@sha256:6d43704baacd1bfbe7c295d7f13079d5d8104ed33568873133f8fc69980419df"
 
 usage() {
     cat <<'EOF'
@@ -20,13 +20,25 @@ Environment:
   A3S_BENCH_CANDIDATE  Candidate reference (default: codex)
   A3S_BENCH_MODEL      Optional model passed through --model
   A3S_BENCH_OUTPUT_DIR Directory for logs (default: .test-tmp)
-  A3S_BENCH_INSTALL_DIR Bench component directory (default: target/debug)
 EOF
 }
 
 if [[ "${1:-}" == "--help" || "${1:-}" == "-h" ]]; then
     usage
     exit 0
+fi
+
+if ! a3s bench advanced doctor --json >/dev/null; then
+    echo "The active top-level 'a3s bench' component did not pass its readiness check." >&2
+    echo "Install the package under test before starting the full benchmark." >&2
+    exit 1
+fi
+if [[ "$CANDIDATE" == "codex" ]] && ! docker image inspect "$CODEX_PROXY_HELPER_IMAGE" >/dev/null 2>&1; then
+    echo "The pinned Codex proxy helper image is missing locally:" >&2
+    echo "  $CODEX_PROXY_HELPER_IMAGE" >&2
+    echo "Preload it before running the Codex benchmark:" >&2
+    echo "  docker pull $CODEX_PROXY_HELPER_IMAGE" >&2
+    exit 1
 fi
 
 mapfile -t ALL_TASKS < <(

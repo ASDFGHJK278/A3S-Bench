@@ -19,8 +19,8 @@ const OFFICIAL_ZSH_FILE: &str = "codex-resources/zsh/bin/zsh";
 const MAX_MANIFEST_BYTES: u64 = 64 * 1024;
 const MAX_PACKAGE_FILE_BYTES: u64 = 512 * 1024 * 1024;
 const MAX_PACKAGE_BYTES: u64 = 1024 * 1024 * 1024;
-const NORMALIZED_EXECUTABLE_MODE: u32 = 0o500;
-const NORMALIZED_NONEXECUTABLE_MODE: u32 = 0o400;
+const NORMALIZED_EXECUTABLE_MODE: u32 = 0o555;
+const NORMALIZED_NONEXECUTABLE_MODE: u32 = 0o444;
 
 /// The standalone Codex package manifest is an official Codex file.  A3S
 /// cache identity is deliberately kept out of this type and out of the
@@ -647,9 +647,15 @@ fn verify_cached_root_sealed(root: &Path, metadata: &CacheMetadata) -> Result<Ca
 }
 
 fn reseal_cached_tree(root: &Path) -> Result<()> {
-    crate::state_fs::seal_tree_read_only(root)?;
     #[cfg(unix)]
-    set_sealed_unix_modes(root)?;
+    {
+        // Apply the final normalized modes directly. A two-pass 0500 -> 0555
+        // transition lets concurrent preparers observe a transient mode and
+        // reject an otherwise valid shared cache.
+        set_sealed_unix_modes(root)?;
+    }
+    #[cfg(not(unix))]
+    crate::state_fs::seal_tree_read_only(root)?;
     Ok(())
 }
 
@@ -676,7 +682,7 @@ fn set_sealed_unix_modes(root: &Path) -> Result<()> {
             } else if kind.is_file() {
                 let relative = relative_path(entry_path.strip_prefix(root)?)?;
                 let mode = if relative == MANIFEST_FILE {
-                    0o400
+                    NORMALIZED_NONEXECUTABLE_MODE
                 } else {
                     NORMALIZED_EXECUTABLE_MODE
                 };
@@ -685,7 +691,7 @@ fn set_sealed_unix_modes(root: &Path) -> Result<()> {
                 anyhow::bail!("Codex package sealed tree contains a special file");
             }
         }
-        std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o500))?;
+        std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o555))?;
         Ok(())
     }
 
@@ -703,8 +709,8 @@ fn verify_sealed_tree(root: &Path) -> Result<()> {
             "Codex package sealed tree root must be a real directory"
         );
         anyhow::ensure!(
-            metadata.permissions().mode() & 0o7777 == 0o500,
-            "Codex package directory is not exactly mode 0500"
+            metadata.permissions().mode() & 0o7777 == 0o555,
+            "Codex package directory is not exactly mode 0555"
         );
         for entry in std::fs::read_dir(path)? {
             let entry = entry?;
@@ -720,7 +726,7 @@ fn verify_sealed_tree(root: &Path) -> Result<()> {
                 let metadata = std::fs::symlink_metadata(&entry_path)?;
                 let relative = relative_path(entry_path.strip_prefix(root)?)?;
                 let expected = if relative == MANIFEST_FILE {
-                    0o400
+                    NORMALIZED_NONEXECUTABLE_MODE
                 } else {
                     NORMALIZED_EXECUTABLE_MODE
                 };
@@ -1398,7 +1404,7 @@ mod tests {
                 .permissions()
                 .mode()
                 & 0o777,
-            0o500
+            0o555
         );
     }
 
@@ -1430,10 +1436,10 @@ mod tests {
 
         let loaded = load_cached(state.path(), &product, None).unwrap();
         assert_eq!(loaded.root, prepared.root.canonicalize().unwrap());
-        assert_eq!(mode(&loaded.root), 0o500);
-        assert_eq!(mode(&loaded.root.join("bin")), 0o500);
-        assert_eq!(mode(&loaded.root.join("bin/codex")), 0o500);
-        assert_eq!(mode(&loaded.root.join(MANIFEST_FILE)), 0o400);
+        assert_eq!(mode(&loaded.root), 0o555);
+        assert_eq!(mode(&loaded.root.join("bin")), 0o555);
+        assert_eq!(mode(&loaded.root.join("bin/codex")), 0o555);
+        assert_eq!(mode(&loaded.root.join(MANIFEST_FILE)), 0o444);
     }
 
     #[cfg(unix)]

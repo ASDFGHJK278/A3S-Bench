@@ -8,6 +8,7 @@ use crate::runtime_selection::RuntimeSelection;
 #[derive(Debug, Clone)]
 pub struct LocalConfig {
     pub path: Option<PathBuf>,
+    pub bench_path: Option<PathBuf>,
     pub runtime: RuntimeSelection,
     pub judge_model: Option<String>,
     pub codex_reasoning_effort: Option<String>,
@@ -16,7 +17,6 @@ pub struct LocalConfig {
 #[derive(Default)]
 struct BenchConfig {
     judge_model: Option<String>,
-    codex_reasoning_effort: Option<String>,
 }
 
 pub struct ModelRoute {
@@ -27,24 +27,34 @@ pub struct ModelRoute {
 
 pub fn discover(start: &Path) -> Result<LocalConfig> {
     let path = discover_path(start);
-    let Some(path) = path else {
-        return Ok(LocalConfig {
-            path: None,
-            judge_model: None,
-            codex_reasoning_effort: None,
-            runtime: RuntimeSelection::bench_default()?,
-        });
+    let (runtime, judge_model) = if let Some(config_path) = path.as_deref() {
+        let source = std::fs::read_to_string(config_path)
+            .with_context(|| format!("could not read {}", config_path.display()))?;
+        let document = a3s_acl::parse(&source)
+            .map_err(|error| anyhow::anyhow!("invalid {}: {error}", config_path.display()))?;
+        let bench = parse_bench(&document)?;
+        (parse_runtime(&document)?, bench.judge_model)
+    } else {
+        (RuntimeSelection::bench_default()?, None)
     };
-    let source = std::fs::read_to_string(&path)
-        .with_context(|| format!("could not read {}", path.display()))?;
-    let document = a3s_acl::parse(&source)
-        .map_err(|error| anyhow::anyhow!("invalid {}: {error}", path.display()))?;
-    let bench = parse_bench(&document)?;
+    let bench_path = discover_private_bench_path(start);
+    let codex_reasoning_effort = bench_path
+        .as_deref()
+        .map(|config_path| {
+            let source = std::fs::read_to_string(config_path)
+                .with_context(|| format!("could not read {}", config_path.display()))?;
+            let document = a3s_acl::parse(&source)
+                .map_err(|error| anyhow::anyhow!("invalid {}: {error}", config_path.display()))?;
+            parse_private_bench(&document)
+        })
+        .transpose()?
+        .flatten();
     Ok(LocalConfig {
-        runtime: parse_runtime(&document)?,
-        judge_model: bench.judge_model,
-        codex_reasoning_effort: bench.codex_reasoning_effort,
-        path: Some(path),
+        runtime,
+        judge_model,
+        codex_reasoning_effort,
+        path,
+        bench_path,
     })
 }
 
@@ -118,12 +128,8 @@ fn parse_bench(document: &Document) -> Result<BenchConfig> {
     };
     anyhow::ensure!(block.labels.is_empty(), "bench block must not have labels");
     anyhow::ensure!(
-        block
-            .attributes
-            .keys()
-            .all(|name| name == "judge_model" || name == "codex_reasoning_effort")
-            && block.blocks.is_empty(),
-        "bench block supports only judge_model and codex_reasoning_effort"
+        block.attributes.keys().all(|name| name == "judge_model") && block.blocks.is_empty(),
+        "shared .a3s/config.acl bench block supports only judge_model; move codex_reasoning_effort to .a3s/bench/config.acl"
     );
     let judge_model = block
         .attributes
@@ -140,6 +146,26 @@ fn parse_bench(document: &Document) -> Result<BenchConfig> {
     if let Some(model) = judge_model {
         parse_model_reference(model)?;
     }
+    Ok(BenchConfig {
+        judge_model: judge_model.map(str::to_owned),
+    })
+}
+
+fn parse_private_bench(document: &Document) -> Result<Option<String>> {
+    let Some(block) = document.blocks.first() else {
+        return Ok(None);
+    };
+    anyhow::ensure!(
+        document.blocks.len() == 1
+            && block.name == "bench"
+            && block.labels.is_empty()
+            && block.blocks.is_empty()
+            && block
+                .attributes
+                .keys()
+                .all(|name| name == "codex_reasoning_effort"),
+        "private bench config supports only codex_reasoning_effort"
+    );
     let codex_reasoning_effort = block
         .attributes
         .get("codex_reasoning_effort")
@@ -157,10 +183,7 @@ fn parse_bench(document: &Document) -> Result<BenchConfig> {
     if let Some(effort) = codex_reasoning_effort {
         crate::lock::validate_reasoning_effort(effort)?;
     }
-    Ok(BenchConfig {
-        judge_model: judge_model.map(str::to_owned),
-        codex_reasoning_effort: codex_reasoning_effort.map(str::to_owned),
-    })
+    Ok(codex_reasoning_effort.map(str::to_owned))
 }
 
 fn parse_model_reference(value: &str) -> Result<(&str, &str)> {
@@ -188,6 +211,19 @@ fn discover_path(start: &Path) -> Option<PathBuf> {
     std::env::var_os("HOME")
         .map(PathBuf::from)
         .map(|home| home.join(".a3s/config.acl"))
+        .filter(|path| path.is_file())
+}
+
+fn discover_private_bench_path(start: &Path) -> Option<PathBuf> {
+    for directory in start.ancestors() {
+        let candidate = directory.join(".a3s/bench/config.acl");
+        if candidate.is_file() {
+            return Some(candidate);
+        }
+    }
+    std::env::var_os("HOME")
+        .map(PathBuf::from)
+        .map(|home| home.join(".a3s/bench/config.acl"))
         .filter(|path| path.is_file())
 }
 
@@ -278,8 +314,13 @@ mod tests {
     #[test]
     fn discovers_codex_reasoning_effort_without_judge_model() {
         let directory = tempfile::tempdir().unwrap();
-        let config_directory = directory.path().join(".a3s");
-        std::fs::create_dir(&config_directory).unwrap();
+        let config_directory = directory.path().join(".a3s/bench");
+        std::fs::create_dir_all(&config_directory).unwrap();
+        std::fs::write(
+            directory.path().join(".a3s/config.acl"),
+            "default_model = \"openai/test\"",
+        )
+        .unwrap();
         std::fs::write(
             config_directory.join("config.acl"),
             "bench { codex_reasoning_effort = \"none\" }",
@@ -289,6 +330,10 @@ mod tests {
         let discovered = discover(directory.path()).unwrap();
         assert_eq!(discovered.judge_model, None);
         assert_eq!(discovered.codex_reasoning_effort.as_deref(), Some("none"));
+        assert_eq!(
+            discovered.bench_path.as_deref(),
+            Some(config_directory.join("config.acl").as_path())
+        );
     }
 
     #[test]
@@ -296,7 +341,7 @@ mod tests {
         let document =
             a3s_acl::parse("bench { codex_reasoning_effort = \"invalid-reasoning-effort\" }")
                 .unwrap();
-        let error = parse_bench(&document).err().unwrap();
+        let error = parse_private_bench(&document).err().unwrap();
         assert!(error
             .to_string()
             .contains("reasoning effort must be one of"));
@@ -306,8 +351,24 @@ mod tests {
     fn rejects_unknown_bench_attributes() {
         let document = a3s_acl::parse("bench { reasoning_effort = \"none\" }").unwrap();
         let error = parse_bench(&document).err().unwrap();
+        assert!(error.to_string().contains("supports only judge_model"));
+    }
+
+    #[test]
+    fn shared_config_points_legacy_reasoning_to_private_path() {
+        let document = a3s_acl::parse("bench { codex_reasoning_effort = \"none\" }").unwrap();
+        let error = parse_bench(&document).err().unwrap();
+        assert!(error.to_string().contains(".a3s/bench/config.acl"));
+    }
+
+    #[test]
+    fn rejects_unknown_private_bench_attributes() {
+        let document =
+            a3s_acl::parse("bench { codex_reasoning_effort = \"none\" unknown = \"value\" }")
+                .unwrap();
+        let error = parse_private_bench(&document).unwrap_err();
         assert!(error
             .to_string()
-            .contains("supports only judge_model and codex_reasoning_effort"));
+            .contains("supports only codex_reasoning_effort"));
     }
 }

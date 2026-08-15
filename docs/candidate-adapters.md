@@ -105,6 +105,20 @@ visible inside that container, including the copied `auth.json`, and can modify
 the mounted workspace. Do not treat Codex's internal sandbox as an additional
 boundary for files mounted into the container.
 
+For a Task with `network_need = "none"`, the Codex work container is attached
+only to a per-run internal Docker network. A local
+`python@sha256:6d43704baacd1bfbe7c295d7f13079d5d8104ed33568873133f8fc69980419df`
+sidecar image (resolved from `python:3.12-alpine`) provides an allowlisted
+HTTPS CONNECT path to the Codex control plane;
+it binds only the internal interface and does not provide general Task egress.
+Before opening an upstream connection, the sidecar also requires the TLS
+ClientHello SNI to equal the CONNECT authority. Bench uses the helper image
+with `--pull never`, so it must already exist locally. A Task that explicitly
+locks `network_need = "public_internet"` continues to use Docker `bridge`
+directly and does not create the restricted proxy sidecar. See
+[Containerized Codex Candidate](containerized-codex-candidate.md) for the exact
+allowlist and limits.
+
 Select the Codex model with `--model` and reasoning effort with
 `--reasoning-effort`. Valid efforts are `none`, `minimal`, `low`, `medium`,
 `high`, and `xhigh`; omitted values leave Codex's defaults selected. Both
@@ -118,7 +132,7 @@ a3s bench run ./task \
 ```
 
 For compatibility with top-level `a3s` releases that do not yet forward the
-flag, configure the default in `.a3s/config.acl` and omit the command-line
+flag, configure the default in `.a3s/bench/config.acl` and omit the command-line
 option:
 
 ```acl

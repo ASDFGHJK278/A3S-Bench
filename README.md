@@ -223,7 +223,7 @@ a3s bench run quick_file_edit \
 ```
 
 When the top-level `a3s` version does not forward `--reasoning-effort`, set a
-Codex-only default in the project-local or user-local `.a3s/config.acl`:
+Codex-only default in the project-local or user-local `.a3s/bench/config.acl`:
 
 ```acl
 bench {
@@ -245,16 +245,22 @@ that same controller.
 The bundled `codex` Candidate is the native Codex CLI product, but it is not
 host-native execution. Bench verifies the complete official standalone package
 prepared from the host installation, stores it in a content-addressed cache,
-and bind-mounts that cache read-only into the Task work Docker container. Runs
-reuse the cache; Codex is not downloaded or installed for each run.
+copies it through an unstarted staging container into a private owner-labeled
+Docker volume, and mounts that volume read-only in the Task work container.
+Runs reuse the verified host cache, but no host path is bind-mounted and Codex
+is not downloaded or installed for each run.
 
 Before a Codex run, Bench copies the host login `auth.json` (from
 `$CODEX_HOME/auth.json` or `$HOME/.codex/auth.json`) into a private per-run
-home and mounts that copy into the same container. It does not pass
-`OPENAI_API_KEY` or `CODEX_API_KEY`. To match EdgeBench, Codex's internal
-sandbox is disabled, so the outer Docker container is the security boundary:
-model tools can read files visible inside that container, including the copied
-`auth.json`.
+home, then stages that home and the workspace into separate private named
+volumes. Package, authentication, and workspace data therefore enter with
+`docker cp --archive`, not host bind mounts. The work container keeps the Task
+image's configured user and native `PATH`/toolchain environment; spawned Codex
+shells inherit that image environment while proxy variables and Codex-private
+paths are excluded. Bench does not pass `OPENAI_API_KEY` or `CODEX_API_KEY`.
+To match EdgeBench, Codex's internal sandbox is disabled, so the outer Docker
+container is the security boundary: model tools can read files visible inside
+that container, including the copied `auth.json`.
 
 The Codex Candidate uses CandidateLock v3. Its `product` identity records the
 Codex package name, version, target triple, and artifact-set digest; the lock

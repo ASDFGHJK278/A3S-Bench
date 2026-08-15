@@ -14,7 +14,7 @@ use std::time::{Duration, Instant};
 
 static RUN_DIRECTORY_SEQUENCE: AtomicU64 = AtomicU64::new(0);
 
-const CONTAINER_TREE_EXPORT_TIMEOUT: Duration = Duration::from_secs(30 * 60);
+pub(crate) const CONTAINER_TREE_EXPORT_TIMEOUT: Duration = Duration::from_secs(30 * 60);
 const CONTAINER_TREE_EXPORT_MAX_BYTES: u64 = 32 * 1024 * 1024 * 1024;
 const PROCESS_STDERR_LIMIT: usize = 64 * 1024;
 const PIPELINE_POLL_INTERVAL: Duration = Duration::from_millis(10);
@@ -48,10 +48,181 @@ pub fn create_empty(task: &TaskInfo) -> Result<PathBuf> {
     Ok(destination.canonicalize()?)
 }
 
+#[cfg(test)]
 pub fn export_container_tree(container: &str, source_path: &str, destination: &Path) -> Result<()> {
     populate_empty_directory_atomically(destination, |staging| {
         extract_seed_tree(container, source_path, staging)
     })
+}
+
+const CONTAINER_FILE_TAR_OVERHEAD: u64 = 1024 * 1024;
+
+pub(crate) fn export_container_files(
+    container: &str,
+    source_path: &str,
+    destination: &Path,
+    relative_paths: &[PathBuf],
+    policy: &crate::task::SubmissionPolicy,
+    deadline: Instant,
+) -> Result<()> {
+    let matcher = crate::submission::terminal_matcher(policy)?;
+    let mut candidates = Vec::new();
+    for relative in relative_paths {
+        let normalized = crate::submission::normalize_terminal_path(relative)?;
+        if matcher.matches(&normalized) {
+            candidates.push((normalized, relative.clone()));
+        }
+    }
+    candidates.sort_by(|left, right| left.0.cmp(&right.0));
+    anyhow::ensure!(
+        candidates.windows(2).all(|pair| pair[0].0 != pair[1].0),
+        "container workspace inventory contains a duplicate path"
+    );
+
+    populate_empty_directory_atomically(destination, |staging| {
+        export_selected_container_files(
+            container,
+            source_path,
+            staging,
+            &candidates,
+            policy,
+            deadline,
+        )
+    })
+}
+
+fn export_selected_container_files(
+    container: &str,
+    source_path: &str,
+    staging: &Path,
+    candidates: &[(String, PathBuf)],
+    policy: &crate::task::SubmissionPolicy,
+    deadline: Instant,
+) -> Result<()> {
+    let parent = staging
+        .parent()
+        .ok_or_else(|| anyhow::anyhow!("workspace export staging has no parent"))?;
+    let probe = crate::state_fs::create_unique_staging_directory(parent, "workspace-export-file")
+        .context("could not create workspace export probe")?;
+    let result = (|| {
+        let mut remaining_bytes = CONTAINER_TREE_EXPORT_MAX_BYTES;
+        let mut limits = crate::submission::TerminalLimits::new(policy);
+        for (normalized, relative) in candidates {
+            if limits.is_full() {
+                break;
+            }
+            let remaining = deadline
+                .checked_duration_since(Instant::now())
+                .ok_or_else(|| {
+                    anyhow::anyhow!("workspace OCI export exceeded its fixed deadline")
+                })?;
+            anyhow::ensure!(
+                !remaining.is_zero(),
+                "workspace OCI export exceeded its fixed deadline"
+            );
+            replace_directory(&probe).context("could not reset workspace export probe")?;
+            secure_directory(&probe).context("could not secure workspace export probe")?;
+            let container_path = format!("{}/{}", source_path.trim_end_matches('/'), normalized);
+            let policy_cap = policy
+                .max_file_bytes
+                .saturating_add(CONTAINER_FILE_TAR_OVERHEAD);
+            let copy_cap = remaining_bytes.min(policy_cap);
+            anyhow::ensure!(
+                remaining_bytes != 0,
+                "workspace archive exceeded its fixed cumulative transfer limit"
+            );
+            let transferred = match extract_container_file(
+                container,
+                &container_path,
+                &probe,
+                remaining,
+                copy_cap,
+            ) {
+                Ok(transferred) => transferred,
+                Err(error) if copy_cap == policy_cap => {
+                    let Some(ArchivePumpError::Limit { consumed, .. }) =
+                        error.downcast_ref::<ArchivePumpError>()
+                    else {
+                        return Err(error);
+                    };
+                    remaining_bytes = remaining_bytes.checked_sub(*consumed).ok_or_else(|| {
+                        anyhow::anyhow!(
+                            "workspace archive exceeded its fixed cumulative transfer limit"
+                        )
+                    })?;
+                    continue;
+                }
+                Err(error) => return Err(error),
+            };
+            remaining_bytes = remaining_bytes.checked_sub(transferred).ok_or_else(|| {
+                anyhow::anyhow!("workspace archive transfer accounting underflowed")
+            })?;
+            let file =
+                only_regular_file(&probe).context("could not validate workspace export probe")?;
+            let size = file
+                .metadata()
+                .context("could not inspect exported terminal file")?
+                .len();
+            if !limits.select(size) {
+                continue;
+            }
+            let target = staging.join(relative);
+            if let Some(parent) = target.parent() {
+                secure_directory(parent)
+                    .context("could not secure exported terminal file parent")?;
+            }
+            std::fs::rename(&file, &target).with_context(|| {
+                format!(
+                    "could not retain exported submission file {}",
+                    relative.display()
+                )
+            })?;
+        }
+        Ok(())
+    })();
+    let cleanup = crate::state_fs::remove_tree(&probe);
+    match (result, cleanup) {
+        (Err(error), _) => Err(error),
+        (Ok(()), Err(error)) => Err(error).context("could not clean workspace export probe"),
+        (Ok(()), Ok(())) => Ok(()),
+    }
+}
+
+fn only_regular_file(root: &Path) -> Result<PathBuf> {
+    fn visit(directory: &Path, found: &mut Option<PathBuf>) -> Result<()> {
+        for entry in std::fs::read_dir(directory)? {
+            let entry = entry?;
+            let kind = entry.file_type()?;
+            if kind.is_dir() {
+                visit(&entry.path(), found)?;
+            } else if kind.is_file() {
+                anyhow::ensure!(
+                    found.is_none(),
+                    "Docker copied more than one terminal workspace file"
+                );
+                *found = Some(entry.path());
+            } else {
+                anyhow::bail!("Docker copied a non-regular terminal workspace entry");
+            }
+        }
+        Ok(())
+    }
+
+    let mut found = None;
+    visit(root, &mut found)?;
+    found.ok_or_else(|| anyhow::anyhow!("Docker copied no terminal workspace file"))
+}
+
+fn extract_container_file(
+    container: &str,
+    source_path: &str,
+    destination: &Path,
+    timeout: Duration,
+    max_bytes: u64,
+) -> Result<u64> {
+    let mut copy = docker_copy_file_command(container, source_path);
+    let mut extract = tar_extract_command(destination);
+    run_archive_pipeline(&mut copy, &mut extract, timeout, max_bytes)
 }
 
 fn populate_empty_directory_atomically<F>(destination: &Path, populate: F) -> Result<()>
@@ -69,10 +240,11 @@ where
     let parent = destination
         .parent()
         .ok_or_else(|| anyhow::anyhow!("container workspace export destination has no parent"))?;
-    let staging = crate::state_fs::create_unique_staging_directory(parent, "workspace-export")?;
+    let staging = crate::state_fs::create_unique_staging_directory(parent, "workspace-export")
+        .context("could not create workspace export staging")?;
     let result = (|| {
         populate(&staging)?;
-        set_tree_owner_only(&staging)?;
+        set_tree_owner_only(&staging).context("could not harden exported container workspace")?;
         // On Unix, renaming a directory over an existing empty directory is
         // atomic. The original empty destination therefore remains visible
         // until the complete, permission-hardened tree is ready.
@@ -309,7 +481,7 @@ fn clone_tree(source: &Path, destination: &Path) -> Result<()> {
 #[derive(Debug)]
 enum ArchivePumpError {
     Deadline,
-    Limit { limit: u64 },
+    Limit { limit: u64, consumed: u64 },
     Io(io::Error),
 }
 
@@ -317,7 +489,7 @@ impl fmt::Display for ArchivePumpError {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             Self::Deadline => write!(formatter, "workspace archive transfer timed out"),
-            Self::Limit { limit } => write!(
+            Self::Limit { limit, .. } => write!(
                 formatter,
                 "workspace archive exceeded the fixed {limit}-byte transfer limit"
             ),
@@ -364,6 +536,7 @@ fn extract_seed_tree(container: &str, source_path: &str, destination: &Path) -> 
         CONTAINER_TREE_EXPORT_TIMEOUT,
         CONTAINER_TREE_EXPORT_MAX_BYTES,
     )
+    .map(|_| ())
 }
 
 fn run_archive_pipeline(
@@ -371,7 +544,7 @@ fn run_archive_pipeline(
     extract_command: &mut Command,
     timeout: Duration,
     max_bytes: u64,
-) -> Result<()> {
+) -> Result<u64> {
     // The archive is pumped in userspace rather than connecting the two
     // children directly. This makes the raw transfer byte limit enforceable.
     let mut copy = copy_command
@@ -517,8 +690,7 @@ fn run_archive_pipeline(
         "could not extract workspace OCI seed{}",
         stderr_suffix("tar extraction", &extract_stderr)
     );
-    pump_result.expect("pump result is populated before pipeline completion")?;
-    Ok(())
+    Ok(pump_result.expect("pump result is populated before pipeline completion")?)
 }
 
 fn poll_child(child: &mut Child, status: &mut Option<ExitStatus>) -> io::Result<()> {
@@ -556,9 +728,15 @@ where
         }
         let next = transferred
             .checked_add(count as u64)
-            .ok_or(ArchivePumpError::Limit { limit: max_bytes })?;
+            .ok_or(ArchivePumpError::Limit {
+                limit: max_bytes,
+                consumed: u64::MAX,
+            })?;
         if next > max_bytes {
-            return Err(ArchivePumpError::Limit { limit: max_bytes });
+            return Err(ArchivePumpError::Limit {
+                limit: max_bytes,
+                consumed: next,
+            });
         }
         destination.write_all(&buffer[..count])?;
         transferred = next;
@@ -615,6 +793,12 @@ fn docker_copy_command(container: &str, source_path: &str) -> Command {
     command
 }
 
+fn docker_copy_file_command(container: &str, source_path: &str) -> Command {
+    let source = format!("{container}:{source_path}");
+    let mut command = Command::new("docker");
+    command.args(["cp", &source, "-"]);
+    command
+}
 fn tar_extract_command(destination: &Path) -> Command {
     let mut command = Command::new("tar");
     command.args(["-x", "--no-same-owner", "-C"]);
@@ -693,6 +877,105 @@ fn copy_tree(source: &Path, destination: &Path) -> Result<()> {
 mod tests {
     use super::*;
 
+    #[cfg(unix)]
+    #[test]
+    fn isolated_export_probe_rejects_non_regular_entries() {
+        use std::os::unix::fs::symlink;
+
+        let probe = tempfile::tempdir().unwrap();
+        std::fs::write(probe.path().join("target"), "data").unwrap();
+        symlink("target", probe.path().join("link")).unwrap();
+        assert!(only_regular_file(probe.path()).is_err());
+    }
+
+    #[test]
+    #[ignore = "requires Docker and the native Alpine image"]
+    fn filtered_container_export_copies_only_deterministically_selected_files() {
+        struct ContainerGuard(String);
+        impl Drop for ContainerGuard {
+            fn drop(&mut self) {
+                let _ = Command::new("docker").args(["rm", "-f", &self.0]).output();
+            }
+        }
+
+        let name = format!(
+            "a3s-bench-filtered-export-test-{}-{}",
+            std::process::id(),
+            RUN_DIRECTORY_SEQUENCE.fetch_add(1, Ordering::Relaxed)
+        );
+        let script = concat!(
+            "mkdir -p /workspace/keep /workspace/cache; ",
+            "dd if=/dev/zero of=/workspace/keep/a.txt bs=600 count=1 2>/dev/null; ",
+            "dd if=/dev/zero of=/workspace/keep/b.txt bs=600 count=1 2>/dev/null; ",
+            "dd if=/dev/zero of=/workspace/keep/c.txt bs=400 count=1 2>/dev/null; ",
+            "dd if=/dev/zero of=/workspace/cache/huge.bin bs=1024 count=2048 2>/dev/null"
+        );
+        let created = Command::new("docker")
+            .args([
+                "create",
+                "--name",
+                &name,
+                "docker.io/library/alpine:3.20",
+                "sh",
+                "-c",
+                script,
+            ])
+            .output()
+            .unwrap();
+        assert!(
+            created.status.success(),
+            "{}",
+            String::from_utf8_lossy(&created.stderr)
+        );
+        let container = String::from_utf8(created.stdout).unwrap().trim().to_owned();
+        let _guard = ContainerGuard(container.clone());
+        let started = Command::new("docker")
+            .args(["start", "--attach", &container])
+            .output()
+            .unwrap();
+        assert!(started.status.success());
+
+        let output = tempfile::tempdir().unwrap();
+        let destination = output.path().join("workspace");
+        secure_directory(&destination).unwrap();
+        let policy = crate::task::SubmissionPolicy {
+            include: vec!["keep/".into()],
+            exclude: Vec::new(),
+            max_files: 10,
+            max_total_bytes: 1_024,
+            max_file_bytes: 700,
+        };
+        let paths = vec![
+            PathBuf::from("cache/huge.bin"),
+            PathBuf::from("keep/c.txt"),
+            PathBuf::from("keep/b.txt"),
+            PathBuf::from("keep/a.txt"),
+        ];
+        export_container_files(
+            &container,
+            "/workspace",
+            &destination,
+            &paths,
+            &policy,
+            Instant::now() + Duration::from_secs(60),
+        )
+        .unwrap_or_else(|error| panic!("{error:#}"));
+
+        assert_eq!(
+            std::fs::metadata(destination.join("keep/a.txt"))
+                .unwrap()
+                .len(),
+            600
+        );
+        assert!(!destination.join("keep/b.txt").exists());
+        assert_eq!(
+            std::fs::metadata(destination.join("keep/c.txt"))
+                .unwrap()
+                .len(),
+            400
+        );
+        assert!(!destination.join("cache").exists());
+    }
     #[test]
     fn archive_pump_copies_data_within_the_limit() {
         let source = io::Cursor::new(b"bounded archive".to_vec());
@@ -721,7 +1004,13 @@ mod tests {
         )
         .unwrap_err();
 
-        assert!(matches!(error, ArchivePumpError::Limit { limit: 16 }));
+        assert!(matches!(
+            error,
+            ArchivePumpError::Limit {
+                limit: 16,
+                consumed: 17
+            }
+        ));
         assert!(destination.len() <= 16);
     }
 

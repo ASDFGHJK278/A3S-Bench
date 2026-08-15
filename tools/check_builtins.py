@@ -16,6 +16,12 @@ EXPECTED_DATASET_COMMIT = "47846a4c3669ad447e0ea984833b0d352460c5f9"
 EXPECTED_HARNESS_COMMIT = "f59bcb0f024d4bc8baedeac271306050e4bb0d33"
 EXPECTED_TASKS = 51
 EXPECTED_MODES = {"batch": 48, "game_server": 3}
+EXPECTED_BLOCKED_TASKS = {
+    "exchange_core_throughput": "judge_dependency_closure_incomplete",
+    "jagua_nesting_optimization": "required_toolchain_missing_from_work_and_judge_images",
+    "new_foundations_consistency": "locked_judge_dependency_missing",
+    "order_addition_permutation_optimization": "judge_scoring_asset_hash_mismatch",
+}
 
 
 def sha256(path: Path) -> str:
@@ -113,12 +119,13 @@ def main() -> None:
         descriptor = json.loads(descriptor_path.read_text(encoding="utf-8"))
         require(entry["path"] == f"tasks/{task_id}", f"path: {task_id}")
         require(entry["execution_class"] == "long_horizon", f"execution class: {task_id}")
-        expected_availability = "ready"
+        expected_availability = "blocked" if task_id in EXPECTED_BLOCKED_TASKS else "ready"
         require(entry["availability"] == expected_availability, f"availability: {task_id}")
-        expected_availability_reason = (
+        expected_availability_reason = EXPECTED_BLOCKED_TASKS.get(
+            task_id,
             "requires_configured_judge_model"
             if task_id == "college_english_exam_bank"
-            else "bundled_oci_task"
+            else "bundled_oci_task",
         )
         require(
             entry["availability_reason"] == expected_availability_reason,

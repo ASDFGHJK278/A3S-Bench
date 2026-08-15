@@ -13,8 +13,9 @@ usage() {
     cat <<'EOF'
 Usage: ./run_full_benchmark.sh [task-selector ...]
 
-Task selectors may be task names, one-based task numbers, or ranges such as
-3-8. With no selectors, every listed task runs.
+Task selectors may be task names, one-based catalog numbers, or ranges such as
+3-8. With no selectors, every catalog task is accounted for. Ready tasks run;
+blocked tasks are reported with their reason and make the batch return nonzero.
 
 Environment:
   A3S_BENCH_CANDIDATE  Candidate reference (default: codex)
@@ -33,18 +34,40 @@ if ! a3s bench advanced doctor --json >/dev/null; then
     echo "Install the package under test before starting the full benchmark." >&2
     exit 1
 fi
-if [[ "$CANDIDATE" == "codex" ]] && ! docker image inspect "$CODEX_PROXY_HELPER_IMAGE" >/dev/null 2>&1; then
-    echo "The pinned Codex proxy helper image is missing locally:" >&2
-    echo "  $CODEX_PROXY_HELPER_IMAGE" >&2
-    echo "Preload it before running the Codex benchmark:" >&2
-    echo "  docker pull $CODEX_PROXY_HELPER_IMAGE" >&2
+
+TASK_ROWS_TEXT="$(
+    a3s bench list --all --json |
+        python3 -c '
+import json
+import sys
+
+tasks = json.load(sys.stdin)["data"]["tasks"]
+for task in tasks:
+    availability = task["availability"]
+    values = (task["id"], availability, task["availability_reason"])
+    if availability not in {"ready", "blocked"}:
+        raise SystemExit(f"invalid task availability: {availability!r}")
+    if any("\t" in value or "\n" in value or "\r" in value for value in values):
+        raise SystemExit("task listing fields must be single-line and tab-free")
+    print("\t".join(values))
+'
+)" || exit 1
+
+if [[ -z "$TASK_ROWS_TEXT" ]]; then
+    echo "No benchmark tasks were returned by 'a3s bench list --all'." >&2
     exit 1
 fi
 
-mapfile -t ALL_TASKS < <(
-    a3s bench list --json |
-        python3 -c 'import json, sys; [print(task["id"]) for task in json.load(sys.stdin)["data"]["tasks"]]'
-)
+mapfile -t TASK_ROWS <<<"$TASK_ROWS_TEXT"
+ALL_TASKS=()
+TASK_AVAILABILITY=()
+TASK_AVAILABILITY_REASON=()
+for row in "${TASK_ROWS[@]}"; do
+    IFS=$'\t' read -r task availability reason <<<"$row"
+    ALL_TASKS+=("$task")
+    TASK_AVAILABILITY+=("$availability")
+    TASK_AVAILABILITY_REASON+=("$reason")
+done
 
 if ((${#ALL_TASKS[@]} == 0)); then
     echo "No benchmark tasks were returned by 'a3s bench list'." >&2
@@ -94,9 +117,11 @@ SUMMARY_FILE="$RUN_DIR/summary.log"
 
 PASSED=0
 FAILED=0
+BLOCKED=0
 SKIPPED=0
 MATCHED=0
 TOTAL=${#ALL_TASKS[@]}
+HELPER_PREFLIGHT_DONE=0
 
 for offset in "${!ALL_TASKS[@]}"; do
     index=$((offset + 1))
@@ -106,6 +131,26 @@ for offset in "${!ALL_TASKS[@]}"; do
         continue
     fi
     MATCHED=$((MATCHED + 1))
+
+    availability="${TASK_AVAILABILITY[$offset]}"
+    availability_reason="${TASK_AVAILABILITY_REASON[$offset]}"
+    if [[ "$availability" == "blocked" ]]; then
+        BLOCKED=$((BLOCKED + 1))
+        printf '%-40s | %-7s | %s\n' "$task" "BLOCKED" "$availability_reason" \
+            | tee -a "$SUMMARY_FILE"
+        continue
+    fi
+
+    if [[ "$CANDIDATE" == "codex" && $HELPER_PREFLIGHT_DONE -eq 0 ]]; then
+        if ! docker image inspect "$CODEX_PROXY_HELPER_IMAGE" >/dev/null 2>&1; then
+            echo "The pinned Codex proxy helper image is missing locally:" >&2
+            echo "  $CODEX_PROXY_HELPER_IMAGE" >&2
+            echo "Preload it before running the Codex benchmark:" >&2
+            echo "  docker pull $CODEX_PROXY_HELPER_IMAGE" >&2
+            exit 1
+        fi
+        HELPER_PREFLIGHT_DONE=1
+    fi
 
     safe_task="${task//[^[:alnum:]_.-]/_}"
     raw_log="$RUN_DIR/$(printf '%03d' "$index")-$safe_task.log"
@@ -129,7 +174,7 @@ for offset in "${!ALL_TASKS[@]}"; do
         result="FAIL"
         FAILED=$((FAILED + 1))
     fi
-    printf '%-40s | %-4s | %-12s | %dm%02ds | exit=%d\n' \
+    printf '%-40s | %-7s | %-12s | %dm%02ds | exit=%d\n' \
         "$task" "$result" "$score" "$((duration / 60))" "$((duration % 60))" "$exit_code" \
         | tee -a "$SUMMARY_FILE"
 done
@@ -145,8 +190,9 @@ fi
     echo "Skipped: $SKIPPED"
     echo "Passed: $PASSED"
     echo "Failed: $FAILED"
+    echo "Blocked: $BLOCKED"
     echo "End: $(date)"
     echo "Logs: $RUN_DIR"
 } | tee -a "$SUMMARY_FILE"
 
-((FAILED == 0))
+((FAILED == 0 && BLOCKED == 0))

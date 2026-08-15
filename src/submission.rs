@@ -230,7 +230,7 @@ fn normalize(path: &Path) -> Result<String> {
 }
 
 fn reserved(path: &str) -> bool {
-    path == ".a3s/bench" || path.starts_with(".a3s/bench/")
+    path == ".a3s" || path.starts_with(".a3s/")
 }
 
 #[cfg(test)]
@@ -272,12 +272,29 @@ mod tests {
         let output = tempfile::tempdir().unwrap();
         std::fs::create_dir_all(source.path().join("src")).unwrap();
         std::fs::create_dir_all(source.path().join(".a3s/bench")).unwrap();
+        std::fs::create_dir_all(source.path().join(".a3s/memory")).unwrap();
         std::fs::write(source.path().join("src/main.rs"), "main").unwrap();
         std::fs::write(source.path().join("src/debug.log"), "log").unwrap();
         std::fs::write(source.path().join(".a3s/bench/secret"), "secret").unwrap();
+        std::fs::write(source.path().join(".a3s/memory/index.json"), "{}").unwrap();
         project(source.path(), output.path(), &policy(&["src/"], &["*.log"])).unwrap();
         assert!(output.path().join("src/main.rs").is_file());
         assert!(!output.path().join("src/debug.log").exists());
+        assert!(!output.path().join(".a3s").exists());
+    }
+
+    #[test]
+    fn reserved_excludes_all_a3s_subdirectories() {
+        let source = tempfile::tempdir().unwrap();
+        let output = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(source.path().join(".a3s/memory")).unwrap();
+        std::fs::create_dir_all(source.path().join(".a3s/bench")).unwrap();
+        std::fs::write(source.path().join(".a3s/memory/items.json"), "{}").unwrap();
+        std::fs::write(source.path().join(".a3s/bench/run.json"), "{}").unwrap();
+        std::fs::write(source.path().join(".a3s/config.json"), "{}").unwrap();
+        std::fs::write(source.path().join("solution.rs"), "fn main() {}").unwrap();
+        project(source.path(), output.path(), &policy(&["."], &[])).unwrap();
+        assert!(output.path().join("solution.rs").is_file());
         assert!(!output.path().join(".a3s").exists());
     }
 

@@ -136,7 +136,7 @@ fn configure_model_gateway(
 ) -> Result<()> {
     if required {
         let model = model.ok_or_else(|| anyhow::anyhow!("Judge requires a model gateway route"))?;
-        let base_url = container_base_url(&model.base_url);
+        let base_url = container_base_url(&model.base_url)?;
         command
             .args(["--network", "bridge"])
             .args(["--add-host", "host.docker.internal:host-gateway"])
@@ -152,18 +152,40 @@ fn configure_model_gateway(
     Ok(())
 }
 
-fn container_base_url(value: &str) -> String {
-    for local in ["localhost", "127.0.0.1", "[::1]"] {
-        for scheme in ["http", "https"] {
-            let prefix = format!("{scheme}://{local}");
-            if let Some(suffix) = value.strip_prefix(&prefix) {
-                if suffix.is_empty() || suffix.starts_with(':') || suffix.starts_with('/') {
-                    return format!("{scheme}://host.docker.internal{suffix}");
-                }
-            }
-        }
+fn container_base_url(value: &str) -> Result<String> {
+    let mut url = reqwest::Url::parse(value)
+        .map_err(|_| anyhow::anyhow!("Judge model base_url must be an absolute HTTP(S) URL"))?;
+    anyhow::ensure!(
+        matches!(url.scheme(), "http" | "https"),
+        "Judge model base_url must use HTTP or HTTPS"
+    );
+    anyhow::ensure!(
+        url.username().is_empty() && url.password().is_none(),
+        "Judge model base_url must not contain user information"
+    );
+    anyhow::ensure!(
+        url.query().is_none() && url.fragment().is_none(),
+        "Judge model base_url must not contain a query or fragment"
+    );
+
+    let root_path = url.path() == "/";
+    if root_path {
+        url.set_path("/v1");
     }
-    value.to_owned()
+    let local = matches!(
+        url.host_str(),
+        Some("localhost" | "127.0.0.1" | "::1" | "[::1]")
+    );
+    if local {
+        url.set_host(Some("host.docker.internal"))
+            .map_err(|_| anyhow::anyhow!("could not map local Judge model base_url to Docker"))?;
+        return Ok(url.into());
+    }
+    if root_path {
+        Ok(url.into())
+    } else {
+        Ok(value.to_owned())
+    }
 }
 
 fn shell_quote(value: &str) -> String {
@@ -937,7 +959,7 @@ mod tests {
         let route = crate::config::ModelRoute {
             model: "grader".into(),
             api_key: "top-secret".into(),
-            base_url: "https://example.test/v1".into(),
+            base_url: "https://example.test".into(),
         };
         let mut command = Command::new("docker");
         configure_model_gateway(&mut command, true, Some(&route)).unwrap();
@@ -963,13 +985,71 @@ mod tests {
         );
         assert_eq!(environment["SFORGE_JUDGE_MODEL"].as_deref(), Some("grader"));
         assert_eq!(
-            container_base_url("http://127.0.0.1:8080/v1"),
+            environment["SFORGE_JUDGE_API_BASE_URL"].as_deref(),
+            Some("https://example.test/v1")
+        );
+        assert_eq!(
+            container_base_url("http://127.0.0.1:8080/v1").unwrap(),
             "http://host.docker.internal:8080/v1"
         );
         assert_eq!(
-            container_base_url("https://api.example.test/v1"),
+            container_base_url("https://api.example.test/v1").unwrap(),
             "https://api.example.test/v1"
         );
+    }
+
+    #[test]
+    fn container_base_url_normalization_is_conservative() {
+        let cases = [
+            (
+                "https://token.pjlab.org.cn",
+                "https://token.pjlab.org.cn/v1",
+            ),
+            (
+                "https://token.pjlab.org.cn/",
+                "https://token.pjlab.org.cn/v1",
+            ),
+            ("https://api.example.test/v1", "https://api.example.test/v1"),
+            (
+                "https://api.example.test/api/v1",
+                "https://api.example.test/api/v1",
+            ),
+            (
+                "https://api.example.test/custom/",
+                "https://api.example.test/custom/",
+            ),
+            (
+                "http://localhost:8080",
+                "http://host.docker.internal:8080/v1",
+            ),
+            (
+                "http://127.0.0.1:8080/",
+                "http://host.docker.internal:8080/v1",
+            ),
+            (
+                "http://[::1]:8080/api/v1",
+                "http://host.docker.internal:8080/api/v1",
+            ),
+            (
+                "http://localhost.example:8080/",
+                "http://localhost.example:8080/v1",
+            ),
+        ];
+        for (input, expected) in cases {
+            assert_eq!(container_base_url(input).unwrap(), expected, "{input}");
+        }
+
+        for input in [
+            "not a URL",
+            "https://",
+            "ftp://api.example.test/",
+            "https://api.example.test/?api-version=2026",
+            "https://api.example.test/v1?api-version=2026",
+            "https://api.example.test/v1#fragment",
+            "https://user:secret@api.example.test/",
+        ] {
+            assert!(container_base_url(input).is_err(), "{input}");
+        }
     }
 
     #[test]

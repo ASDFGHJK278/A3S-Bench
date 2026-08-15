@@ -497,7 +497,7 @@
       "generated_sha256": {
         "private/judge/.a3s/asset.acl": "sha256:80617bd3f89af7575c856fa8b1f830018446d0194f11a9da8cad1bca9c4a8f4f",
         "private/judge/agent.md": "sha256:1ca9f0483e9e8ef4d05bf1717445ba7d84ab37366beb4a0ecd4653bd206eabaf",
-        "private/judge/judge.source.json": "sha256:d2f54c78e3b34586f3de6f89423f43517f102342d58a5fa539d0054e5bcff997",
+        "private/judge/judge.source.json": "sha256:a23b8039ded66833f155addcb7dddde75d3a920f085cc004abfee5f4623eeff2",
         "public/prompt.md": "sha256:bc86798dfdff26b0173359b950b1d7f4c852641f9be31f61d13fce91a86a6833",
         "task.acl": "sha256:904fbbf000c79144a339c508c7928267f2cfa0925fee8ced289fd4a88bec5cbf"
       },

@@ -430,8 +430,8 @@
       "path": "tasks/rust_multicrate_reconstruction",
       "provenance_ref": "provenance/edgebench.json#rust_multicrate_reconstruction",
       "execution_class": "long_horizon",
-      "availability": "ready",
-      "availability_reason": "bundled_oci_task"
+      "availability": "blocked",
+      "availability_reason": "required_toolchain_missing_from_judge_image"
     },
     {
       "admission": "quarantined",

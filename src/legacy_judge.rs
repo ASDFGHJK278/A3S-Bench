@@ -260,11 +260,7 @@ fn parse_score(source: &LegacyJudgeSource, output: &str) -> Result<f64> {
         }
         "pytest_v" => match extract_total_score(output)? {
             Some(raw) => normalize_raw(source.rescale.as_ref(), raw),
-            None => match source.selection_hint.as_str() {
-                "pass_rate_first" => pytest_ratio(output),
-                "score_first" | "valid_then_score" => Ok(0.0),
-                value => anyhow::bail!("unsupported legacy Judge selection policy {value:?}"),
-            },
+            None => pytest_ratio(output),
         },
         value => anyhow::bail!("unsupported legacy Judge parser {value:?}"),
     }
@@ -591,12 +587,24 @@ mod tests {
     }
 
     #[test]
-    fn pytest_v_uses_rescaled_total_score_even_when_some_tests_fail() {
-        let source = pytest_v_source(Some(
-            serde_json::json!({"kind":"linear","lower":0.0,"upper":100.0}),
-        ));
+    fn pytest_v_selection_hint_does_not_affect_rescaled_total_score() {
         let output = "=== 4 passed, 1 failed in 0.28s ===\nTOTAL_SCORE 50.0\n";
-        assert_eq!(parse_score(&source, output).unwrap(), 0.5);
+        for selection_hint in [
+            "score_first",
+            "pass_rate_first",
+            "valid_then_score",
+            "unknown",
+        ] {
+            let mut source = pytest_v_source(Some(
+                serde_json::json!({"kind":"linear","lower":0.0,"upper":100.0}),
+            ));
+            source.selection_hint = selection_hint.into();
+            assert_eq!(
+                parse_score(&source, output).unwrap(),
+                0.5,
+                "selection_hint={selection_hint}"
+            );
+        }
     }
 
     #[test]
@@ -635,35 +643,22 @@ mod tests {
     }
 
     #[test]
-    fn pytest_v_missing_total_score_is_zero_for_score_first() {
-        let mut source = pytest_v_source(Some(
-            serde_json::json!({"kind":"linear","lower":0.0,"upper":100.0}),
-        ));
-        source.selection_hint = "score_first".into();
-        assert_eq!(
-            parse_score(&source, "=== 4 passed, 1 failed in 0.28s ===").unwrap(),
-            0.0
-        );
-    }
-
-    #[test]
-    fn pytest_v_missing_total_score_is_zero_for_valid_then_score() {
-        let mut source = pytest_v_source(None);
-        source.selection_hint = "valid_then_score".into();
-        assert_eq!(
-            parse_score(&source, "=== 2 passed in 0.01s ===").unwrap(),
-            0.0
-        );
-    }
-
-    #[test]
-    fn pytest_v_rejects_unknown_selection_policy() {
-        let mut source = pytest_v_source(None);
-        source.selection_hint = "unknown".into();
-        let error = parse_score(&source, "=== 2 passed in 0.01s ===").unwrap_err();
-        assert!(error
-            .to_string()
-            .contains("unsupported legacy Judge selection policy"));
+    fn pytest_v_selection_hint_does_not_affect_missing_total_score_fallback() {
+        let output = "=== 4 passed, 1 failed in 0.28s ===";
+        for selection_hint in [
+            "score_first",
+            "pass_rate_first",
+            "valid_then_score",
+            "unknown",
+        ] {
+            let mut source = pytest_v_source(None);
+            source.selection_hint = selection_hint.into();
+            assert_eq!(
+                parse_score(&source, output).unwrap(),
+                0.8,
+                "selection_hint={selection_hint}"
+            );
+        }
     }
 
     #[test]

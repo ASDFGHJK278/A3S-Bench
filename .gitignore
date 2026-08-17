@@ -20,3 +20,4 @@
 *.log
 test_all_results_20260806_211647/bipedalwalker_locomotion_rl.log
 test_all_results_20260806_211647/summary.csv
+task.txt

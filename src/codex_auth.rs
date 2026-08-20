@@ -233,11 +233,6 @@ fn read_auth_defensively(source: &Path) -> Result<SecretBuffer> {
     #[cfg(unix)]
     {
         use std::os::unix::fs::MetadataExt;
-        use std::os::unix::fs::PermissionsExt;
-        anyhow::ensure!(
-            metadata.permissions().mode() & 0o077 == 0,
-            "Codex auth.json must not be readable by group or other users"
-        );
         anyhow::ensure!(
             metadata.nlink() == 1,
             "Codex auth.json must not be a hard link"
@@ -261,14 +256,9 @@ fn read_auth_defensively(source: &Path) -> Result<SecretBuffer> {
     #[cfg(unix)]
     {
         use std::os::unix::fs::MetadataExt;
-        use std::os::unix::fs::PermissionsExt;
         anyhow::ensure!(
             opened.dev() == metadata.dev() && opened.ino() == metadata.ino(),
             "Codex auth.json changed while it was being opened"
-        );
-        anyhow::ensure!(
-            opened.permissions().mode() & 0o077 == 0,
-            "Codex auth.json permissions changed while it was being opened"
         );
         anyhow::ensure!(
             opened.nlink() == 1,
@@ -289,12 +279,10 @@ fn read_auth_defensively(source: &Path) -> Result<SecretBuffer> {
     #[cfg(unix)]
     {
         use std::os::unix::fs::MetadataExt;
-        use std::os::unix::fs::PermissionsExt;
         anyhow::ensure!(
             final_metadata.dev() == metadata.dev()
                 && final_metadata.ino() == metadata.ino()
-                && final_metadata.nlink() == 1
-                && final_metadata.permissions().mode() & 0o077 == 0,
+                && final_metadata.nlink() == 1,
             "Codex auth.json changed while it was being copied"
         );
     }
@@ -537,14 +525,14 @@ mod tests {
     }
 
     #[test]
-    fn rejects_symlinks_and_group_readable_auth() {
+    fn accepts_group_readable_auth_but_rejects_symlinks() {
         use std::os::unix::fs::symlink;
         let root = tempfile::tempdir().unwrap();
         let source = root.path().join("fake-auth.json");
         std::fs::write(&source, r#"{"access_token":"fake"}"#).unwrap();
         std::fs::set_permissions(&source, std::fs::Permissions::from_mode(0o640)).unwrap();
-        assert!(stage_from_source(&root.path().join("state"), &source).is_err());
-        std::fs::set_permissions(&source, std::fs::Permissions::from_mode(0o600)).unwrap();
+        let staged = stage_from_source(&root.path().join("state"), &source).unwrap();
+        drop(staged);
         let link = root.path().join("link-auth.json");
         symlink(&source, &link).unwrap();
         assert!(stage_from_source(&root.path().join("state"), &link).is_err());

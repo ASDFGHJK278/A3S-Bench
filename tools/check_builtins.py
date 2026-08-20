@@ -17,11 +17,7 @@ EXPECTED_HARNESS_COMMIT = "f59bcb0f024d4bc8baedeac271306050e4bb0d33"
 EXPECTED_TASKS = 51
 EXPECTED_MODES = {"batch": 48, "game_server": 3}
 EXPECTED_BLOCKED_TASKS = {
-    "exchange_core_throughput": "judge_dependency_closure_incomplete",
-    "jagua_nesting_optimization": "required_toolchain_missing_from_work_and_judge_images",
-    "new_foundations_consistency": "locked_judge_dependency_missing",
     "order_addition_permutation_optimization": "judge_scoring_asset_hash_mismatch",
-    "rust_multicrate_reconstruction": "required_toolchain_missing_from_judge_image",
 }
 
 

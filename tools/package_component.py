@@ -16,7 +16,12 @@ from pathlib import Path
 
 
 ROOT = Path(__file__).resolve().parents[1]
-EMBEDDED_RUNTIME_ASSETS = (ROOT / "runtime_assets" / "codex_connect_proxy.py",)
+EMBEDDED_RUNTIME_ASSETS = (
+    ROOT / "runtime_assets" / "codex_connect_proxy.py",
+    ROOT / "runtime_assets" / "codex_run_loop.sh",
+    ROOT / "runtime_assets" / "codex_stop_hook.sh",
+    ROOT / "runtime_assets" / "codex_hooks.json",
+)
 
 
 def package_version() -> str:
@@ -42,7 +47,10 @@ def validate_embedded_runtime_assets(binary: Path) -> None:
     executable = binary.read_bytes()
     for asset in EMBEDDED_RUNTIME_ASSETS:
         source = asset.read_bytes()
-        ast.parse(source, filename=str(asset))
+        if asset.suffix == ".py":
+            ast.parse(source, filename=str(asset))
+        elif asset.suffix == ".json":
+            json.loads(source)
         if source not in executable:
             raise SystemExit(
                 f"required runtime asset is not embedded in component binary: {asset}"

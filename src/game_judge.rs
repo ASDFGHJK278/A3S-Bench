@@ -66,7 +66,7 @@ impl GameSession {
                 script.display()
             ))
             .arg(&source.image)
-            .args(["/bin/bash", "-lc", &command])
+            .args(["/bin/bash", "-c", &command])
             .output()?;
         if !output.status.success() {
             anyhow::bail!(

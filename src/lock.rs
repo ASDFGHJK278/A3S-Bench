@@ -189,6 +189,7 @@ pub fn create_candidate_with_codex_default(
     } else {
         reasoning_effort
     };
+    validate_model_reasoning_compatibility(model.as_deref(), reasoning_effort.as_deref())?;
     if locked_asset.protocol == crate::asset::CandidateProtocol::CodexExec {
         if let Some(model) = model.as_deref() {
             validate_codex_model(model)?;
@@ -313,6 +314,10 @@ pub fn load_candidate(path: &Path, state_root: &Path) -> Result<(CandidateLock, 
         if let Some(reasoning_effort) = value.reasoning_effort.as_deref() {
             validate_reasoning_effort(reasoning_effort)?;
         }
+        validate_model_reasoning_compatibility(
+            value.model.as_deref(),
+            value.reasoning_effort.as_deref(),
+        )?;
     }
     anyhow::ensure!(
         !value.candidate_revision.trim().is_empty(),
@@ -367,6 +372,19 @@ pub fn validate_reasoning_effort(value: &str) -> Result<()> {
         ),
         "reasoning effort must be one of none, minimal, low, medium, high, or xhigh"
     );
+    Ok(())
+}
+
+pub fn validate_model_reasoning_compatibility(
+    model: Option<&str>,
+    reasoning_effort: Option<&str>,
+) -> Result<()> {
+    if model == Some("gpt-5.3-codex-spark") {
+        anyhow::ensure!(
+            matches!(reasoning_effort, Some("low" | "medium" | "high" | "xhigh")),
+            "gpt-5.3-codex-spark requires reasoning effort low, medium, high, or xhigh"
+        );
+    }
     Ok(())
 }
 
@@ -429,7 +447,7 @@ mod compatibility_tests {
             lock_digest: String::new(),
             candidate_revision: format!("sha256:{}", "a".repeat(64)),
             artifact_digest: format!("sha256:{}", "b".repeat(64)),
-            model: Some("gpt-5.6-luna".into()),
+            model: Some("gpt-5.3-codex-spark".into()),
             reasoning_effort: None,
             product: Some(CandidateProductLock {
                 name: "codex-cli".into(),
@@ -481,13 +499,18 @@ mod compatibility_tests {
         for (name, value, expected) in [
             (
                 "invalid-model",
-                v3_candidate_lock("gpt 5.6 luna", "none"),
+                v3_candidate_lock("gpt 5.3 codex spark", "low"),
                 "Codex model must contain only ASCII letters",
             ),
             (
                 "invalid-reasoning-effort",
-                v3_candidate_lock("gpt-5.6-luna", "invalid"),
+                v3_candidate_lock("gpt-5.3-codex-spark", "invalid"),
                 "reasoning effort must be one of",
+            ),
+            (
+                "spark-none",
+                v3_candidate_lock("gpt-5.3-codex-spark", "none"),
+                "requires reasoning effort low, medium, high, or xhigh",
             ),
         ] {
             let path = state.path().join(format!("candidate-v3-{name}.lock.json"));

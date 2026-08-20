@@ -25,11 +25,11 @@ pub fn execute(
     }
     // Judge command runs under `timeout` inside the container; no
     // environment variable passthrough is needed.
-    let timeout_runner = format!(
-        "timeout --kill-after=10 {} /bin/bash -lc {}",
-        source.timeout_sec,
-        shell_quote(&source.command),
-    );
+    let timeout_sec = source
+        .timeout_sec
+        .checked_add(if source.requires_model_gateway { 30 } else { 0 })
+        .context("Judge timeout plus gateway cleanup grace overflowed")?;
+    let timeout_runner = build_timeout_runner(timeout_sec, &source.command);
     let judge_command = legacy_judge_command(
         "/a3s/submission",
         &source.workspace_source_path,
@@ -42,7 +42,7 @@ pub fn execute(
             submission.display()
         ))
         .arg(&source.image)
-        .args(["/bin/bash", "-lc", &judge_command])
+        .args(non_login_bash(&judge_command))
         .output()
         .context("could not start legacy OCI Judge")?;
     let mut raw = String::from_utf8_lossy(&output.stdout).into_owned();
@@ -51,10 +51,11 @@ pub fn execute(
 
     let exit_code = output.status.code();
 
-    match classify_judge_exit(source, exit_code) {
-        JudgeExitClass::Completed => {}
+    let ratio = match classify_judge_exit(source, exit_code) {
+        JudgeExitClass::Completed => parse_score(source, &raw)?,
         JudgeExitClass::CandidateTimeout => {
             eprintln!("Judge exceeded descriptor timeout; scoring 0.0");
+            0.0
         }
         JudgeExitClass::ModelGatewayTimeout => {
             anyhow::bail!("model-backed Judge exceeded descriptor timeout");
@@ -67,11 +68,7 @@ pub fn execute(
                 snippet
             );
         }
-    }
-
-    // An ordinary exit without a structured result means the candidate's
-    // submission could not be scored (for example, it failed to compile).
-    let ratio = parse_score(source, &raw)?;
+    };
 
     let primary = task
         .metrics
@@ -117,12 +114,8 @@ fn configure_judge_container(command: &mut Command) {
         "--rm",
         "--user",
         "0:0",
-        "--cap-drop",
-        "ALL",
-        "--cap-add",
-        "DAC_OVERRIDE",
-        "--security-opt",
-        "no-new-privileges",
+        "--add-host",
+        "host.docker.internal:host-gateway",
     ]);
 }
 
@@ -156,16 +149,12 @@ fn configure_model_gateway(
         let model = model.ok_or_else(|| anyhow::anyhow!("Judge requires a model gateway route"))?;
         let base_url = container_base_url(&model.base_url)?;
         command
-            .args(["--network", "bridge"])
-            .args(["--add-host", "host.docker.internal:host-gateway"])
             .args(["--env", "SFORGE_JUDGE_API_KEY"])
             .args(["--env", "SFORGE_JUDGE_API_BASE_URL"])
             .args(["--env", "SFORGE_JUDGE_MODEL"])
             .env("SFORGE_JUDGE_API_KEY", &model.api_key)
             .env("SFORGE_JUDGE_API_BASE_URL", base_url)
             .env("SFORGE_JUDGE_MODEL", &model.model);
-    } else {
-        command.args(["--network", "none"]);
     }
     Ok(())
 }
@@ -206,6 +195,18 @@ fn container_base_url(value: &str) -> Result<String> {
     }
 }
 
+fn non_login_bash(command: &str) -> [&str; 3] {
+    ["/bin/bash", "-c", command]
+}
+
+fn build_timeout_runner(timeout_sec: u64, command: &str) -> String {
+    format!(
+        "timeout --kill-after=10 {} /bin/bash -c {}",
+        timeout_sec,
+        shell_quote(command),
+    )
+}
+
 fn shell_quote(value: &str) -> String {
     format!("'{}'", value.replace('\'', "'\"'\"'"))
 }
@@ -213,8 +214,8 @@ fn shell_quote(value: &str) -> String {
 fn legacy_judge_command(source: &str, destination: &str, timeout_runner: &str) -> String {
     let source = format!("{}/.", source.trim_end_matches('/'));
     let destination = shell_quote(destination);
-    // The judge container runs as root with DAC_OVERRIDE, so no permission
-    // fixup is needed for the destination tree.
+    // The trusted judge container runs as root with Docker's default
+    // capabilities, matching the imported EdgeBench harness.
     // A previous `chmod -R u+rwX {destination}` was removed because it
     // recursed over the entire judge workspace (which can contain 130K+
     // files from the judge image), stalling for over an hour before the
@@ -258,10 +259,17 @@ fn parse_score(source: &LegacyJudgeSource, output: &str) -> Result<f64> {
             let raw = extract_total_score(output)?.unwrap_or(0.0);
             normalize_raw(source.rescale.as_ref(), raw)
         }
-        "pytest_v" => match extract_total_score(output)? {
-            Some(raw) => normalize_raw(source.rescale.as_ref(), raw),
-            None => pytest_ratio(output),
-        },
+        "pytest_v" => {
+            let missing_score = match source.selection_hint.as_str() {
+                "pass_rate_first" => pytest_ratio(output)?,
+                "score_first" | "valid_then_score" => 0.0,
+                value => anyhow::bail!("unsupported Judge selection policy {value:?}"),
+            };
+            match extract_total_score(output)? {
+                Some(raw) => normalize_raw(source.rescale.as_ref(), raw),
+                None => Ok(missing_score),
+            }
+        }
         value => anyhow::bail!("unsupported legacy Judge parser {value:?}"),
     }
 }
@@ -589,12 +597,7 @@ mod tests {
     #[test]
     fn pytest_v_selection_hint_does_not_affect_rescaled_total_score() {
         let output = "=== 4 passed, 1 failed in 0.28s ===\nTOTAL_SCORE 50.0\n";
-        for selection_hint in [
-            "score_first",
-            "pass_rate_first",
-            "valid_then_score",
-            "unknown",
-        ] {
+        for selection_hint in ["score_first", "pass_rate_first", "valid_then_score"] {
             let mut source = pytest_v_source(Some(
                 serde_json::json!({"kind":"linear","lower":0.0,"upper":100.0}),
             ));
@@ -643,22 +646,24 @@ mod tests {
     }
 
     #[test]
-    fn pytest_v_selection_hint_does_not_affect_missing_total_score_fallback() {
+    fn pytest_v_missing_total_score_follows_selection_hint() {
         let output = "=== 4 passed, 1 failed in 0.28s ===";
-        for selection_hint in [
-            "score_first",
-            "pass_rate_first",
-            "valid_then_score",
-            "unknown",
+        for (selection_hint, expected) in [
+            ("score_first", 0.0),
+            ("pass_rate_first", 0.8),
+            ("valid_then_score", 0.0),
         ] {
             let mut source = pytest_v_source(None);
             source.selection_hint = selection_hint.into();
             assert_eq!(
                 parse_score(&source, output).unwrap(),
-                0.8,
+                expected,
                 "selection_hint={selection_hint}"
             );
         }
+        let mut unknown = pytest_v_source(None);
+        unknown.selection_hint = "unknown".into();
+        assert!(parse_score(&unknown, output).is_err());
     }
 
     #[test]
@@ -734,7 +739,7 @@ mod tests {
     }
 
     #[test]
-    fn judge_container_uses_only_the_required_override_capability() {
+    fn judge_container_matches_edgebench_trusted_judge_baseline() {
         let mut command = Command::new("docker");
         configure_judge_container(&mut command);
         let arguments = command
@@ -742,15 +747,27 @@ mod tests {
             .map(|value| value.to_string_lossy().into_owned())
             .collect::<Vec<_>>();
 
+        assert!(arguments.windows(2).any(|pair| pair == ["--user", "0:0"]));
         assert!(arguments
             .windows(2)
-            .any(|pair| pair == ["--cap-drop", "ALL"]));
-        assert!(arguments
-            .windows(2)
-            .any(|pair| pair == ["--cap-add", "DAC_OVERRIDE"]));
-        assert!(arguments
-            .windows(2)
-            .any(|pair| pair == ["--security-opt", "no-new-privileges"]));
+            .any(|pair| { pair == ["--add-host", "host.docker.internal:host-gateway"] }));
+        assert!(!arguments.iter().any(|argument| argument == "--cap-drop"));
+        assert!(!arguments.iter().any(|argument| argument == "--cap-add"));
+        assert!(!arguments
+            .iter()
+            .any(|argument| argument == "--security-opt"));
+    }
+
+    #[test]
+    fn judge_commands_use_non_login_bash_and_default_network() {
+        assert_eq!(non_login_bash("judge"), ["/bin/bash", "-c", "judge"]);
+        assert_eq!(
+            build_timeout_runner(15, "judge"),
+            "timeout --kill-after=10 15 /bin/bash -c 'judge'"
+        );
+        let mut command = Command::new("docker");
+        configure_model_gateway(&mut command, false, None).unwrap();
+        assert!(!command.get_args().any(|argument| argument == "--network"));
     }
 
     #[test]

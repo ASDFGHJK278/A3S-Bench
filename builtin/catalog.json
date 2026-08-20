@@ -190,8 +190,8 @@
       "path": "tasks/exchange_core_throughput",
       "provenance_ref": "provenance/edgebench.json#exchange_core_throughput",
       "execution_class": "long_horizon",
-      "availability": "blocked",
-      "availability_reason": "judge_dependency_closure_incomplete"
+      "availability": "ready",
+      "availability_reason": "bundled_oci_task"
     },
     {
       "admission": "quarantined",
@@ -274,8 +274,8 @@
       "path": "tasks/jagua_nesting_optimization",
       "provenance_ref": "provenance/edgebench.json#jagua_nesting_optimization",
       "execution_class": "long_horizon",
-      "availability": "blocked",
-      "availability_reason": "required_toolchain_missing_from_work_and_judge_images"
+      "availability": "ready",
+      "availability_reason": "bundled_oci_task"
     },
     {
       "admission": "quarantined",
@@ -346,8 +346,8 @@
       "path": "tasks/new_foundations_consistency",
       "provenance_ref": "provenance/edgebench.json#new_foundations_consistency",
       "execution_class": "long_horizon",
-      "availability": "blocked",
-      "availability_reason": "locked_judge_dependency_missing"
+      "availability": "ready",
+      "availability_reason": "bundled_oci_task"
     },
     {
       "admission": "quarantined",
@@ -430,8 +430,8 @@
       "path": "tasks/rust_multicrate_reconstruction",
       "provenance_ref": "provenance/edgebench.json#rust_multicrate_reconstruction",
       "execution_class": "long_horizon",
-      "availability": "blocked",
-      "availability_reason": "required_toolchain_missing_from_judge_image"
+      "availability": "ready",
+      "availability_reason": "bundled_oci_task"
     },
     {
       "admission": "quarantined",

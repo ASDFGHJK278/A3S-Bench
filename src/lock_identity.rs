@@ -144,6 +144,8 @@ mod tests {
 
     #[test]
     fn historical_v2_identity_vector_is_unchanged() {
+        // This literal is a frozen historical record used only to prove old
+        // identity compatibility. It never selects or invokes a test model.
         let value = CandidateLock {
             schema: "a3s.bench.candidate-lock.v2".into(),
             lock_digest: String::new(),

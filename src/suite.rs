@@ -549,17 +549,17 @@ mod tests {
     fn reasoning_effort_changes_suite_identity() {
         let baseline = CandidateSpec {
             agent: "a".into(),
-            model: Some("gpt-5.6-luna".into()),
-            reasoning_effort: None,
+            model: Some("gpt-5.3-codex-spark".into()),
+            reasoning_effort: Some("low".into()),
         };
         let candidate = CandidateSpec {
             agent: "b".into(),
-            model: Some("gpt-5.6-luna".into()),
-            reasoning_effort: Some("none".into()),
+            model: Some("gpt-5.3-codex-spark".into()),
+            reasoning_effort: Some("medium".into()),
         };
         let first = spec_digest("core", &["task".into()], &baseline, &candidate).unwrap();
         let mut changed = candidate;
-        changed.reasoning_effort = Some("low".into());
+        changed.reasoning_effort = Some("high".into());
         let second = spec_digest("core", &["task".into()], &baseline, &changed).unwrap();
         assert_ne!(first, second);
     }

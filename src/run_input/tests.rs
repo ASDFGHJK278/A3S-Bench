@@ -19,13 +19,13 @@ fn parses_codex_reasoning_effort_and_rejects_locked_override() {
         "--agent".into(),
         "codex".into(),
         "--model".into(),
-        "gpt-5.6-luna".into(),
+        "gpt-5.3-codex-spark".into(),
         "--reasoning-effort".into(),
-        "none".into(),
+        "low".into(),
     ];
     let parsed = RunOptions::parse(&args).unwrap();
-    assert_eq!(parsed.model.as_deref(), Some("gpt-5.6-luna"));
-    assert_eq!(parsed.reasoning_effort.as_deref(), Some("none"));
+    assert_eq!(parsed.model.as_deref(), Some("gpt-5.3-codex-spark"));
+    assert_eq!(parsed.reasoning_effort.as_deref(), Some("low"));
     let mut locked_args = args;
     locked_args.push("--locked".into());
     let locked = RunOptions::parse(&locked_args).unwrap();

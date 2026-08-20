@@ -17,6 +17,7 @@ struct RuntimeExecution<'a> {
 }
 
 struct CandidateRun {
+    candidate_event_log_digest: Option<String>,
     execution: crate::result_record::CandidateExecution,
     model_usage: Option<model_candidate::ModelExecution>,
 }
@@ -182,12 +183,14 @@ fn execute_inner(
             model: loaded.model.as_deref(),
             candidate_execution: &candidate_run.execution,
             model_usage: candidate_run.model_usage.as_ref(),
+            candidate_event_log_digest: candidate_run.candidate_event_log_digest.as_deref(),
             primary_metric: &primary.name,
             score,
             judge_result: &judge_result,
         },
     )?;
     journal.complete(&path, &record.result_digest)?;
+    crate::result_record::LocalResultRecord::publish_latest(state_root, &record.run_id)?;
     if emit_result {
         print_result(
             options,
@@ -341,16 +344,22 @@ fn execute_candidate(
             state_root,
             event_log: Some(&event_log),
         };
-        return Ok(match crate::codex_candidate::execute(request)? {
+        let outcome = crate::codex_candidate::execute(request)?;
+        let event_bytes =
+            crate::state_fs::read_regular_file(&event_log, "Codex event log for result binding")?;
+        let event_log_digest = crate::result_identity::digest_bytes(&event_bytes);
+        return Ok(match outcome {
             crate::codex_candidate::CodexOutcome::Completed(model_usage) => CandidateRun {
                 execution: crate::result_record::CandidateExecution::completed(),
                 model_usage,
+                candidate_event_log_digest: Some(event_log_digest.clone()),
             },
             crate::codex_candidate::CodexOutcome::TimedOut => CandidateRun {
                 execution: crate::result_record::CandidateExecution::timed_out(
                     task.candidate_timeout_sec,
                 ),
                 model_usage: None,
+                candidate_event_log_digest: Some(event_log_digest),
             },
         });
     }
@@ -384,6 +393,7 @@ fn execute_candidate(
         return Ok(CandidateRun {
             execution,
             model_usage: None,
+            candidate_event_log_digest: None,
         });
     };
     anyhow::ensure!(
@@ -434,10 +444,12 @@ fn execute_candidate(
         model_candidate::ModelCandidateOutcome::Completed(model_usage) => CandidateRun {
             execution: crate::result_record::CandidateExecution::completed(),
             model_usage: Some(model_usage),
+            candidate_event_log_digest: None,
         },
         model_candidate::ModelCandidateOutcome::TimedOut { timeout_sec } => CandidateRun {
             execution: crate::result_record::CandidateExecution::timed_out(timeout_sec),
             model_usage: None,
+            candidate_event_log_digest: None,
         },
     })
 }

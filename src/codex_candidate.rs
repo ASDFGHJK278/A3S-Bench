@@ -18,6 +18,8 @@ const CONTAINER_HOME: &str = "/run/a3s-codex/home";
 const CONTAINER_CODEX_HOME: &str = "/run/a3s-codex/home/.codex";
 const CONTAINER_PACKAGE_PARENT: &str = "/opt/a3s";
 const CONTAINER_PACKAGE: &str = "/opt/a3s/codex";
+const CONTAINER_HARNESS: &str = "/etc/codex";
+const STAGED_CONTAINER_HARNESS: &str = "/opt/a3s/codex-harness";
 const FALLBACK_CONTAINER_WORKSPACE: &str = "/workspace";
 const STAGED_CONTAINER_WORKSPACE: &str = "/workspace/tree";
 const PROXY_HELPER_IMAGE: &str =
@@ -25,6 +27,9 @@ const PROXY_HELPER_IMAGE: &str =
 const PROXY_STAGING_PARENT: &str = "/run/a3s-proxy-tools";
 const PROXY_CONTAINER_ROOT: &str = "/opt/a3s-proxy";
 const PROXY_SCRIPT_NAME: &str = "codex_connect_proxy.py";
+const RUN_LOOP_SCRIPT_NAME: &str = "run_loop.sh";
+const STOP_HOOK_SCRIPT_NAME: &str = "stop_hook.sh";
+const HOOKS_CONFIG_NAME: &str = "hooks.json";
 const PROXY_PORT: u16 = 3128;
 const MAX_STDOUT_CAPTURE: usize = 4 * 1024 * 1024;
 const MAX_STDERR_CAPTURE: usize = 512 * 1024;
@@ -745,6 +750,7 @@ pub fn execute(request: CodexExecutionRequest<'_>) -> Result<CodexOutcome> {
     let result = (|| -> Result<CodexOutcome> {
         let mut create =
             build_codex_run_command(&request, &prompt, &resources, &container_workspace)?;
+        let harness_asset = stage_codex_harness_assets(request.state_root)?;
         let proxy_asset = restricted_network
             .then(|| stage_proxy_runtime_asset(request.state_root))
             .transpose()?;
@@ -765,6 +771,7 @@ pub fn execute(request: CodexExecutionRequest<'_>) -> Result<CodexOutcome> {
                 .private_home
                 .as_ref()
                 .expect("Codex auth guard is live"),
+            &harness_asset,
             proxy_asset.as_deref(),
         )?;
         let (created, create_timed_out) =
@@ -883,6 +890,7 @@ fn build_codex_run_command(
     add_proxy_environment(&mut command, resources, request.game_network)?;
     add_game_environment(&mut command, request.game_network)?;
     request.package.verify_for_mount()?;
+    let codex_args = codex_argv(request, prompt, &entrypoint);
     command
         .arg("--mount")
         .arg(format!(
@@ -894,12 +902,17 @@ fn build_codex_run_command(
             "type=volume,src={},dst={CONTAINER_HOME},volume-subpath=home",
             resources.home_volume
         ))
+        .arg("--mount")
+        .arg(format!(
+            "type=volume,src={},dst={CONTAINER_HARNESS},volume-subpath=codex-harness,readonly",
+            resources.package_volume
+        ))
         .arg("--workdir")
         .arg(container_workspace)
         .arg("--entrypoint")
-        .arg(entrypoint)
+        .arg("/bin/sh")
         .arg(&request.task.work_image)
-        .args(codex_argv(request, prompt, container_workspace));
+        .args(codex_args);
     Ok(command)
 }
 
@@ -928,6 +941,7 @@ fn stage_container_inputs(
     container_id: &str,
     request: &CodexExecutionRequest<'_>,
     private_home: &PrivateCodexHome,
+    harness_asset: &Path,
     proxy_asset: Option<&Path>,
 ) -> Result<()> {
     anyhow::ensure!(
@@ -938,6 +952,8 @@ fn stage_container_inputs(
         .context("could not stage the Codex package in its private volume")?;
     copy_tree_into_container(container_id, private_home.path(), CONTAINER_HOME)
         .context("could not stage the private Codex home in its private volume")?;
+    copy_tree_into_container(container_id, harness_asset, STAGED_CONTAINER_HARNESS)
+        .context("could not stage the trusted Codex harness in its private volume")?;
     if let Some(seed_workspace) = request.seed_workspace {
         prepare_workspace_for_container_copy(seed_workspace)?;
         copy_tree_into_container(container_id, seed_workspace, STAGED_CONTAINER_WORKSPACE)
@@ -1021,46 +1037,55 @@ fn copy_tree_into_container(container_id: &str, source: &Path, destination: &str
     Ok(())
 }
 
-fn codex_argv(
-    request: &CodexExecutionRequest<'_>,
-    prompt: &str,
-    container_workspace: &str,
-) -> Vec<String> {
-    let shell_environment_exclude = if request.game_network.is_some() {
-        r#"shell_environment_policy.exclude=["HTTP_PROXY","HTTPS_PROXY","ALL_PROXY","http_proxy","https_proxy","all_proxy","CODEX_HOME","CODEX_CODE_MODE_HOST_PATH"]"#
-    } else {
-        r#"shell_environment_policy.exclude=["HTTP_PROXY","HTTPS_PROXY","ALL_PROXY","NO_PROXY","http_proxy","https_proxy","all_proxy","no_proxy","CODEX_HOME","CODEX_CODE_MODE_HOST_PATH"]"#
-    };
-    let mut argv = vec![
-        "exec".into(),
-        "--dangerously-bypass-approvals-and-sandbox".into(),
-        "--cd".into(),
-        container_workspace.into(),
-        "--ephemeral".into(),
-        "--json".into(),
-        "--skip-git-repo-check".into(),
-        "--ignore-user-config".into(),
-        "--ignore-rules".into(),
-        "--color".into(),
-        "never".into(),
-        "-c".into(),
-        "shell_environment_policy.inherit=all".into(),
-        "-c".into(),
-        "shell_environment_policy.ignore_default_excludes=false".into(),
-        "-c".into(),
-        shell_environment_exclude.into(),
-    ];
-    if let Some(model) = request.model {
-        argv.extend(["--model".into(), model.into()]);
+fn codex_argv(request: &CodexExecutionRequest<'_>, prompt: &str, entrypoint: &str) -> Vec<String> {
+    vec![
+        format!("{CONTAINER_HARNESS}/{RUN_LOOP_SCRIPT_NAME}"),
+        entrypoint.into(),
+        request.model.unwrap_or_default().into(),
+        request.reasoning_effort.unwrap_or_default().into(),
+        if request.task.work_network_need == "none" {
+            "1".into()
+        } else {
+            "0".into()
+        },
+        prompt.into(),
+    ]
+}
+fn stage_codex_harness_assets(state_root: &Path) -> Result<PathBuf> {
+    let harness_root = state_root.join("runtime-assets/codex-harness");
+    let run_loop = harness_root.join(RUN_LOOP_SCRIPT_NAME);
+    let hook = harness_root.join(STOP_HOOK_SCRIPT_NAME);
+    let hooks = harness_root.join(HOOKS_CONFIG_NAME);
+    let run_loop_bytes = include_bytes!("../runtime_assets/codex_run_loop.sh");
+    let hook_bytes = include_bytes!("../runtime_assets/codex_stop_hook.sh");
+    let hooks_bytes = include_bytes!("../runtime_assets/codex_hooks.json");
+    crate::state_fs::secure_atomic_write(&run_loop, run_loop_bytes)
+        .context("could not stage the embedded Codex run loop")?;
+    crate::state_fs::secure_atomic_write(&hook, hook_bytes)
+        .context("could not stage the embedded Codex stop hook")?;
+    crate::state_fs::secure_atomic_write(&hooks, hooks_bytes)
+        .context("could not stage the embedded Codex hooks configuration")?;
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(&run_loop, std::fs::Permissions::from_mode(0o555))?;
+        std::fs::set_permissions(&hook, std::fs::Permissions::from_mode(0o555))?;
+        std::fs::set_permissions(&hooks, std::fs::Permissions::from_mode(0o444))?;
+        std::fs::set_permissions(&harness_root, std::fs::Permissions::from_mode(0o555))?;
     }
-    if let Some(reasoning_effort) = request.reasoning_effort {
-        argv.extend([
-            "-c".into(),
-            format!("model_reasoning_effort={reasoning_effort}"),
-        ]);
-    }
-    argv.extend(["--".into(), prompt.into()]);
-    argv
+    anyhow::ensure!(
+        crate::state_fs::read_regular_file(&run_loop, "Codex run loop")? == run_loop_bytes,
+        "staged Codex run loop does not match the embedded component"
+    );
+    anyhow::ensure!(
+        crate::state_fs::read_regular_file(&hook, "Codex stop hook")? == hook_bytes,
+        "staged Codex stop hook does not match the embedded component"
+    );
+    anyhow::ensure!(
+        crate::state_fs::read_regular_file(&hooks, "Codex hooks configuration")? == hooks_bytes,
+        "staged Codex hooks configuration does not match the embedded component"
+    );
+    Ok(harness_root)
 }
 
 fn container_path(relative: &str) -> String {
@@ -1382,7 +1407,7 @@ fn container_workspace(task: &TaskInfo) -> Result<String> {
             && !path.chars().any(char::is_control),
         "Codex container workspace path is unsafe"
     );
-    for reserved in [CONTAINER_HOME, CONTAINER_PACKAGE] {
+    for reserved in [CONTAINER_HOME, CONTAINER_PACKAGE, CONTAINER_HARNESS] {
         anyhow::ensure!(
             path != reserved
                 && !path.starts_with(&format!("{reserved}/"))
@@ -2316,8 +2341,39 @@ fn failure_diagnostics(events: &str, stderr: &str) -> String {
 fn parse_usage(events: &str) -> Result<Option<ModelExecution>> {
     let mut usage = None;
     let mut tool_calls_count = 0;
+    let mut saw_thread_started = false;
+    let mut saw_turn_started = false;
+    let mut active_turn = false;
+    let mut malformed_turn_order = false;
+    let mut terminal_turn = None;
     for line in events.lines().filter(|line| !line.trim().is_empty()) {
         let event: Value = serde_json::from_str(line).context("Codex emitted invalid JSONL")?;
+        match event.get("type").and_then(Value::as_str) {
+            Some("thread.started") => saw_thread_started = true,
+            Some("turn.started") => {
+                if active_turn {
+                    malformed_turn_order = true;
+                }
+                saw_turn_started = true;
+                active_turn = true;
+                terminal_turn = None;
+            }
+            Some("turn.completed") => {
+                if !active_turn {
+                    malformed_turn_order = true;
+                }
+                active_turn = false;
+                terminal_turn = Some(true);
+            }
+            Some("turn.failed") => {
+                if !active_turn {
+                    malformed_turn_order = true;
+                }
+                active_turn = false;
+                terminal_turn = Some(false);
+            }
+            _ => {}
+        }
         if event.get("type").and_then(Value::as_str) == Some("item.completed")
             && matches!(
                 event.pointer("/item/type").and_then(Value::as_str),
@@ -2340,6 +2396,22 @@ fn parse_usage(events: &str) -> Result<Option<ModelExecution>> {
             tool_calls_count,
         });
     }
+    anyhow::ensure!(
+        saw_thread_started,
+        "Codex event stream is missing thread.started"
+    );
+    anyhow::ensure!(
+        saw_turn_started,
+        "Codex event stream is missing turn.started"
+    );
+    anyhow::ensure!(
+        !malformed_turn_order && !active_turn,
+        "Codex event stream has malformed turn ordering"
+    );
+    anyhow::ensure!(
+        terminal_turn == Some(true),
+        "Codex event stream did not end in a completed turn"
+    );
     Ok(usage)
 }
 
@@ -2412,6 +2484,10 @@ mod tests {
     #[test]
     fn parses_final_usage_and_counts_commands() {
         let events = concat!(
+            r#"{"type":"thread.started","thread_id":"test"}"#,
+            "\n",
+            r#"{"type":"turn.started"}"#,
+            "\n",
             r#"{"type":"item.completed","item":{"type":"command_execution"}}"#,
             "\n",
             r#"{"type":"turn.completed","usage":{"input_tokens":12,"cached_input_tokens":3,"output_tokens":5}}"#
@@ -2422,6 +2498,36 @@ mod tests {
         assert_eq!(usage.total_tokens, 17);
         assert_eq!(usage.cache_read_tokens, Some(3));
         assert_eq!(usage.tool_calls_count, 1);
+    }
+
+    #[test]
+    fn rejects_incomplete_codex_event_streams() {
+        assert!(parse_usage(
+            r#"{"type":"turn.completed","usage":{"input_tokens":1,"output_tokens":1}}"#
+        )
+        .is_err());
+        assert!(parse_usage(concat!(
+            r#"{"type":"thread.started","thread_id":"test"}"#,
+            "\n",
+            r#"{"type":"turn.completed","usage":{"input_tokens":1,"output_tokens":1}}"#
+        ))
+        .is_err());
+        assert!(parse_usage(concat!(
+            r#"{"type":"thread.started","thread_id":"test"}"#,
+            "\n",
+            r#"{"type":"turn.started"}"#
+        ))
+        .is_err());
+        assert!(parse_usage(concat!(
+            r#"{"type":"thread.started","thread_id":"test"}"#,
+            "\n",
+            r#"{"type":"turn.completed","usage":{"input_tokens":1,"output_tokens":1}}"#,
+            "\n",
+            r#"{"type":"turn.started"}"#,
+            "\n",
+            r#"{"type":"turn.failed","error":{"message":"second pass failed"}}"#
+        ))
+        .is_err());
     }
 
     #[test]
@@ -2522,8 +2628,8 @@ mod tests {
             seed_workspace: None,
             instructions: "instructions",
             task_prompt: "task",
-            model: Some("gpt-5.6-luna"),
-            reasoning_effort: Some("none"),
+            model: Some("gpt-5.3-codex-spark"),
+            reasoning_effort: Some("low"),
             game_network: None,
             timeout_sec: 1,
             state_root: home.path(),
@@ -2541,7 +2647,7 @@ mod tests {
             .any(|pair| { pair == ["--label", "a3s.bench.codex.owner=a3s-bench-codex-test"] }));
         assert!(args
             .windows(2)
-            .any(|pair| pair == ["--entrypoint", "/opt/a3s/codex/bin/codex"]));
+            .any(|pair| pair == ["--entrypoint", "/bin/sh"]));
         assert!(args
             .iter()
             .any(|arg| arg == "CODEX_CODE_MODE_HOST_PATH=/opt/a3s/codex/bin/codex-code-mode-host"));
@@ -2558,6 +2664,19 @@ mod tests {
         assert_eq!(
             args.iter()
                 .filter(|arg| arg.as_str() == package_mount)
+                .count(),
+            1
+        );
+        let harness_mount = format!(
+            "type=volume,src={},dst={CONTAINER_HARNESS},volume-subpath=codex-harness,readonly",
+            resources.package_volume
+        );
+        assert!(args
+            .windows(2)
+            .any(|pair| pair == ["--mount", harness_mount.as_str()]));
+        assert_eq!(
+            args.iter()
+                .filter(|arg| arg.as_str() == harness_mount)
                 .count(),
             1
         );
@@ -2608,54 +2727,27 @@ mod tests {
         );
         assert!(args.iter().any(|arg| arg == &proxy_url));
         assert!(!args.iter().any(|arg| arg.starts_with("GAME_SERVER_URL=")));
-        assert!(args.contains(&"--ephemeral".into()));
-        assert!(args.contains(&"--json".into()));
-        assert!(args.contains(&"--skip-git-repo-check".into()));
-        assert!(args
-            .windows(2)
-            .any(|pair| pair == ["exec", "--dangerously-bypass-approvals-and-sandbox"]));
-        assert!(args
-            .windows(2)
-            .any(|pair| pair == ["--model", "gpt-5.6-luna"]));
+        assert!(!args.iter().any(|arg| {
+            matches!(
+                arg.as_str(),
+                "--ephemeral" | "--ignore-user-config" | "--ignore-rules"
+            ) || arg.starts_with("shell_environment_policy.")
+        }));
         let image_index = args.iter().position(|arg| arg == "alpine:3.20").unwrap();
         assert_eq!(
-            &args[image_index + 1..image_index + 5],
+            &args[image_index + 1..image_index + 7],
             [
-                "exec",
-                "--dangerously-bypass-approvals-and-sandbox",
-                "--cd",
-                "/app"
+                "/etc/codex/run_loop.sh",
+                "/opt/a3s/codex/bin/codex",
+                "gpt-5.3-codex-spark",
+                "low",
+                "1",
+                "prompt",
             ]
         );
-        let config_overrides = args
-            .windows(2)
-            .filter(|pair| pair[0] == "-c")
-            .map(|pair| pair[1].as_str())
-            .collect::<Vec<_>>();
-        assert_eq!(
-            config_overrides,
-            [
-                "shell_environment_policy.inherit=all",
-                "shell_environment_policy.ignore_default_excludes=false",
-                r#"shell_environment_policy.exclude=["HTTP_PROXY","HTTPS_PROXY","ALL_PROXY","NO_PROXY","http_proxy","https_proxy","all_proxy","no_proxy","CODEX_HOME","CODEX_CODE_MODE_HOST_PATH"]"#,
-                "model_reasoning_effort=none",
-            ]
-        );
-        assert_eq!(
-            config_overrides
-                .iter()
-                .filter(|value| value.starts_with("shell_environment_policy.inherit="))
-                .count(),
-            1
-        );
-        assert!(!config_overrides.iter().any(|value| {
-            *value == "shell_environment_policy.inherit=none"
-                || value.starts_with("shell_environment_policy.include_only=")
-                || value.starts_with("shell_environment_policy.set=")
-        }));
-        let separator_index = args.iter().position(|arg| arg == "--").unwrap();
-        assert_eq!(args[separator_index + 1], "prompt");
-        assert!(args.iter().any(|arg| arg == "model_reasoning_effort=none"));
+        assert!(!args
+            .iter()
+            .any(|arg| arg == "--dangerously-bypass-hook-trust"));
         assert!(!args
             .iter()
             .any(|arg| arg == "--privileged" || arg == "danger-full-access"));
@@ -2668,6 +2760,30 @@ mod tests {
                 || arg.contains("preflight")
                 || arg.contains("API_KEY")
         }));
+
+        request.model = Some("gpt-5.3-codex-spark");
+        request.reasoning_effort = Some("low");
+        let spark_command =
+            build_codex_run_command(&request, "spark prompt", &resources, "/app").unwrap();
+        let spark_args = spark_command
+            .get_args()
+            .map(|arg| arg.to_string_lossy().into_owned())
+            .collect::<Vec<_>>();
+        let spark_image_index = spark_args
+            .iter()
+            .position(|arg| arg == "alpine:3.20")
+            .unwrap();
+        assert_eq!(
+            &spark_args[spark_image_index + 1..spark_image_index + 7],
+            [
+                "/etc/codex/run_loop.sh",
+                "/opt/a3s/codex/bin/codex",
+                "gpt-5.3-codex-spark",
+                "low",
+                "1",
+                "spark prompt",
+            ]
+        );
 
         request.game_network = Some((
             "a3s-bench-game-test",
@@ -2707,12 +2823,9 @@ mod tests {
             .filter(|pair| pair[0] == "-c")
             .map(|pair| pair[1].as_str())
             .collect::<Vec<_>>();
-        assert!(game_config_overrides.contains(
-            &r#"shell_environment_policy.exclude=["HTTP_PROXY","HTTPS_PROXY","ALL_PROXY","http_proxy","https_proxy","all_proxy","CODEX_HOME","CODEX_CODE_MODE_HOST_PATH"]"#
-        ));
         assert!(!game_config_overrides
             .iter()
-            .any(|value| value.contains("NO_PROXY") || value.contains("no_proxy")));
+            .any(|value| value.starts_with("shell_environment_policy.")));
         let connect = build_game_network_connect_command("game-network", "candidate-id");
         assert_eq!(
             connect
@@ -2759,6 +2872,101 @@ mod tests {
         task.root = home.path().join("task");
         std::fs::create_dir_all(task.root.join("public/workspace")).unwrap();
         assert_eq!(container_workspace(&task).unwrap(), "/workspace");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn edgebench_stop_hook_always_blocks_completion() {
+        use std::io::Write;
+        use std::os::unix::fs::PermissionsExt;
+        use std::process::Stdio;
+
+        let root = tempfile::tempdir().unwrap();
+        let harness = stage_codex_harness_assets(root.path()).unwrap();
+        let script = harness.join(STOP_HOOK_SCRIPT_NAME);
+        let run_loop = harness.join(RUN_LOOP_SCRIPT_NAME);
+        assert_eq!(
+            std::fs::metadata(&script).unwrap().permissions().mode() & 0o777,
+            0o555
+        );
+        assert_eq!(
+            std::fs::metadata(&run_loop).unwrap().permissions().mode() & 0o777,
+            0o555
+        );
+        assert_eq!(
+            std::fs::metadata(&harness).unwrap().permissions().mode() & 0o777,
+            0o555
+        );
+        let run = |input: &str| {
+            let mut child = Command::new("/bin/sh")
+                .arg(&script)
+                .stdin(Stdio::piped())
+                .stdout(Stdio::piped())
+                .spawn()
+                .unwrap();
+            child
+                .stdin
+                .as_mut()
+                .unwrap()
+                .write_all(input.as_bytes())
+                .unwrap();
+            drop(child.stdin.take());
+            child.wait_with_output().unwrap()
+        };
+        for input in [
+            r#"{"stop_hook_active":false}"#,
+            r#"{"stop_hook_active":true}"#,
+            r#"{ "stop_hook_active": true }"#,
+        ] {
+            let output = run(input);
+            assert!(output.status.success());
+            let value = serde_json::from_slice::<Value>(&output.stdout).unwrap();
+            assert_eq!(value["decision"], "block");
+            assert_eq!(
+                value["reason"],
+                "Do not stop. Continue working on the implementation."
+            );
+        }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn edgebench_run_loop_resumes_last_after_a_normal_exit() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let root = tempfile::tempdir().unwrap();
+        let harness = stage_codex_harness_assets(root.path()).unwrap();
+        let fake_codex = root.path().join("fake-codex.sh");
+        let log = root.path().join("calls.log");
+        std::fs::write(
+            &fake_codex,
+            "#!/bin/sh\nprintf '%s\\n' \"$*\" >>\"$RUN_LOOP_LOG\"\ncase \" $* \" in *' resume --last '*) ;; *) sleep 1 ;; esac\n",
+        )
+        .unwrap();
+        std::fs::set_permissions(&fake_codex, std::fs::Permissions::from_mode(0o755)).unwrap();
+        let output = Command::new("/bin/sh")
+            .arg(harness.join(RUN_LOOP_SCRIPT_NAME))
+            .arg(&fake_codex)
+            .args(["gpt-5.3-codex-spark", "low", "1", "prompt"])
+            .env("RUN_LOOP_LOG", &log)
+            .output()
+            .unwrap();
+        assert!(
+            output.status.success(),
+            "{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        let calls = std::fs::read_to_string(log).unwrap();
+        let calls = calls.lines().collect::<Vec<_>>();
+        assert_eq!(calls.len(), 2);
+        assert_eq!(
+            calls[0],
+            "exec -c web_search=\"disabled\" --dangerously-bypass-approvals-and-sandbox --json --skip-git-repo-check -c features.hooks=true --disable image_generation -c model_reasoning_summary=none --model gpt-5.3-codex-spark -c model_reasoning_effort=low -- prompt"
+        );
+        assert_eq!(
+            calls[1],
+            "exec -c web_search=\"disabled\" resume --last --dangerously-bypass-approvals-and-sandbox --json --skip-git-repo-check -c features.hooks=true --disable image_generation -c model_reasoning_summary=none --model gpt-5.3-codex-spark -c model_reasoning_effort=low Continue working."
+        );
     }
 
     #[test]

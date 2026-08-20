@@ -501,9 +501,11 @@ runs directly inside the existing per-Task Docker work container defined by
 the Task's work image. There is no host-native execution and no nested
 Bubblewrap or Codex sandbox: Codex's internal sandbox is disabled, and Docker
 is the sole sandbox boundary. Model tools can therefore read and modify
-everything visible inside that container, including the copied `auth.json`,
-and they share the Candidate container's Docker `bridge` network; there is no
-per-tool network isolation.
+everything visible inside that container, including the copied `auth.json`.
+For `network_need = "none"`, the Candidate has no default public route and
+reaches only the Codex control-plane allowlist through a dual-homed CONNECT
+sidecar on a per-run internal network. A Task that explicitly requests
+`public_internet` retains ordinary bridge networking.
 
 Bench prepares the official standalone Codex package on the host once per
 artifact digest, stores it in a content-addressed cache, and mounts the
@@ -523,6 +525,20 @@ absence, are lock-bound, and a locked run rejects overrides. For Codex,
 CandidateLock v1 and v2 are historical generations; v2 is the legacy
 native-Codex form and must be regenerated with the current Codex Candidate
 lock command. Ordinary Agent Candidates continue to use CandidateLock v1.
+
+The container receives the package-embedded EdgeBench Codex Stop Hook from a
+read-only `/etc/codex` mount. Every stop request returns `block` with
+`Do not stop. Continue working on the implementation.` The container entrypoint
+runs the initial `codex exec`, then uses `codex exec resume --last ...
+"Continue working."` after every segment lasting at least one second, up to 100
+resumes within the Task's single Candidate timeout. It does not pass
+`--ephemeral`, `--ignore-user-config`, `--ignore-rules`, or A3S-specific shell
+environment policy overrides. Restricted Tasks apply EdgeBench's
+`web_search="disabled"` configuration to the initial command and every resume.
+
+Codex JSONL evidence must contain `thread.started`, `turn.started`, and a final
+`turn.completed`. New local results bind the SHA-256 of the redacted,
+persisted event bytes into their identity and revalidate that artifact on load.
 
 A Codex-versus-Claude Code comparison is two ordinary runs over the same
 TaskLock, with one CandidateLock for each exact adapter and model combination.
@@ -659,13 +675,13 @@ The Bench-specific P1 grammar is closed:
 | --- | --- | --- |
 | `list` | none | `--all`, `--json` |
 | `info` | exactly one Task reference | `--all` only for a bare catalog ID; `--json` |
-| `run` | exactly one Task reference | exactly one `--agent`; optional `--model`, `--locked`, `--json` |
+| `run` | exactly one Task reference | exactly one `--agent`; optional `--model`, `--reasoning-effort`, `--locked`, `--json` |
 | `result` | zero or one run ID | optional `--out`, `--json` |
 | `advanced init` | exactly one creation path | none |
 | `advanced check` | exactly one local authored TaskBundle directory or root `task.acl` | none |
 | `advanced doctor` | none | none |
 | `advanced task lock` | exactly one non-lock Task source | exactly one `--out` |
-| `advanced candidate lock` | exactly one non-lock Candidate adapter reference | optional `--model`; exactly one `--out` |
+| `advanced candidate lock` | exactly one non-lock Candidate adapter reference | optional `--model`, `--reasoning-effort`; exactly one `--out` |
 | `advanced cancel` | exactly one run ID | none |
 
 Each singleton option may occur once. Options have only the spellings above;
@@ -673,6 +689,11 @@ there are no prefix abbreviations, aliases, positional model/Judge values,
 implicit current-task/current-agent values, or option values read from the
 environment. Top-level `a3s` presentation and confirmation options remain
 top-level and cannot change ExperimentPlan semantics.
+For CandidateLock v3, model and reasoning effort are semantic lock inputs.
+Spark accepts `low`, `medium`, `high`, or `xhigh`; an incompatible ambient or
+CLI value is rejected before execution rather than silently changing model
+configuration.
+
 
 Bench parses arguments as an exact token grammar. An option value is the next
 token and is never split on `=`, commas, or whitespace; `--option=value`, short
@@ -694,10 +715,12 @@ same summary, so `result` is for revisiting a run, not a required second step.
 The public `run-id` names the internal Experiment record; `experiment-id` is
 never a second CLI term.
 
-`latest` means the run whose Experiment record committed most recently in this
-project, ordered by the BenchStore commit sequence rather than wall-clock time
-or completion time. Creating a run atomically moves the pointer; completing an
-older run does not steal it back. `result` may drive reconciliation of that
+`latest` means the completed run whose journal committed most recently in this
+project. The result file is persisted first, the completed journal is the
+logical commit point, and only then is the recoverable `latest` index updated.
+An interrupted index update is rebuilt from verified completed journals; an
+uncommitted result can never become latest. `result` may drive reconciliation
+of that
 same run and commit a Runtime-established terminal fact, but it cannot create a
 new Experiment, submit a new logical Runtime operation, re-resolve a selector,
 or re-run Judge.
@@ -1028,6 +1051,12 @@ The shared capability schema defines two values for `model_gateway`:
 Agent environment. A Judge cannot request a broader scope at runtime. An
 operator may reject an unavailable or disallowed route but cannot substitute a
 different outcome-affecting model without producing a different plan.
+
+In the current built-in catalog, `college_english_exam_bank` is the only
+model-backed Judge. It uses the operator-configured, lock-bound
+`bench.judge_model` route. The remaining 51 Judges are deterministic programs
+or protected game services and retain their Task-owned evaluation semantics.
+The canonical batch does not override or constrain the configured Judge model.
 
 For both roles, `network = "none"` is a deny-all socket policy, not merely an
 empty outbound allowlist. Runtime denies DNS, loopback, link-local and metadata

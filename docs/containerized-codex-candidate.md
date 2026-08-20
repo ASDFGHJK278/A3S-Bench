@@ -164,6 +164,7 @@ populate them:
 
 ```text
 package volume /codex -> /opt/a3s/codex             (read-only)
+package volume /codex-harness -> /etc/codex         (read-only system hook)
 home volume /home     -> /run/a3s-codex/home         (read-write)
 workspace volume      -> Task's original absolute path (read-write)
 proxy-tools volume    -> /opt/a3s-proxy              (sidecar, read-only)
@@ -177,18 +178,25 @@ read-only; home and workspace are read-write. `/run/a3s-codex` is a container
 tmpfs that supplies the parent mount point. The host package cache, workspace,
 private home, benchmark state, and proxy source are not bind-mounted.
 
-The command selects `/opt/a3s/codex/bin/codex` as the container entrypoint and
-uses `exec`, `--cd` with the Task's absolute workspace path, `--ephemeral`,
-`--json`, `--skip-git-repo-check`, `--ignore-user-config`, `--ignore-rules`, and
-the locked model and reasoning effort when specified.
-Shell commands use `shell_environment_policy.inherit=all` so the Task image's
-`PATH`, `ELAN_HOME`, and other toolchain environment survive. Default exclusions
-remain enabled, and all upper/lower-case proxy variables plus `CODEX_HOME` and
-`CODEX_CODE_MODE_HOST_PATH` are explicitly excluded from spawned shells. The
-container launch does not inject `PATH`; Docker preserves the work image's
-`Config.Env`. The package code-mode host is passed to the parent Codex process
-by absolute path. No host environment or API-key variable is inherited into the
-container.
+The command selects `/bin/sh` as the container entrypoint and invokes the
+package-embedded run loop with `/opt/a3s/codex/bin/codex`. The first segment uses
+`codex exec --dangerously-bypass-approvals-and-sandbox`; subsequent segments use
+`codex exec resume --last --dangerously-bypass-approvals-and-sandbox "Continue
+working."`, matching EdgeBench. A segment lasting less than one second stops the
+loop as a likely systematic failure; otherwise it resumes up to 100 times within
+the Task's single Candidate timeout. A3S retains `--json` for result evidence,
+`--skip-git-repo-check` for non-Git workspaces, and the locked model/reasoning
+arguments for Candidate identity, but does not pass `--ephemeral`,
+`--ignore-user-config`, `--ignore-rules`, or `shell_environment_policy`
+overrides. For a Task with `network_need = "none"`, both the initial segment
+and every resumed segment receive EdgeBench's `-c web_search="disabled"`
+override.
+
+The package-embedded `/etc/codex/hooks.json`, `stop_hook.sh`, and run-loop script
+are mounted read-only. The Stop Hook matches EdgeBench and always returns
+`{"decision":"block","reason":"Do not stop. Continue working on the implementation."}`.
+The container launch does not inject `PATH`; Docker preserves the work image's
+`Config.Env`. The package code-mode host is passed to Codex by absolute path.
 
 Docker hardening and work-container limits remain part of the contract:
 
@@ -258,8 +266,9 @@ package, and locked loading re-verifies the cached package against those
 values.
 
 Codex model values are validated before command construction and lock loading.
-Reasoning effort is validated against `none`, `minimal`, `low`, `medium`,
-`high`, and `xhigh`. A locked run rejects model or reasoning-effort overrides.
+Reasoning effort is validated against the Candidate/model compatibility rules.
+Spark accepts only `low`, `medium`, `high`, or `xhigh`; the canonical benchmark
+default is `low`. A locked run rejects model or reasoning-effort overrides.
 The `run`, advanced Candidate-lock command, and both suite Candidate blocks
 accept the same reasoning-effort value; when present, it participates in suite
 identity and resume matching. The historical native Codex v2 lock is rejected
@@ -270,25 +279,12 @@ supplied by `bench.codex_reasoning_effort` in `.a3s/bench/config.acl`; the resol
 value is bound into the new lock. Existing locks, AgentTool Candidates, and
 suite specs do not inherit that ambient default.
 
-## Verification evidence
+## Verification contract
 
-The local validation on 2026-08-14 recorded the following real model and
-benchmark smoke:
-
-- run `local-1786696785069-149459-0`, Task `quick_file_edit`;
-- model `gpt-5.6-luna`, reasoning effort `none`;
-- Codex `0.147.0`, target `x86_64-unknown-linux-musl`;
-- completed with score `1` and `11` persisted JSONL events;
-- scans found zero matches for `access_token`, `refresh_token`,
-  `OPENAI_API_KEY`, or `CODEX_API_KEY`;
-- cleanup left zero private Codex homes and zero Codex containers.
-
-Full local gates recorded `148` passed, `4` Docker integration tests ignored,
-and `0` failed. Formatting, Clippy with warnings denied, built-in validation,
-and component-package verification also passed.
-
-This evidence preserves the direct-container trust boundary: tools can read the
-copied auth inside the container, and Docker `bridge` is shared with those
-tools rather than isolated per tool. A same-UID malicious host mutation after
-the immediate-before-mount package verification point is outside the local
-trust boundary.
+Release validation uses `codex`, `gpt-5.3-codex-spark`, and reasoning effort
+`low`. Unit, lint, component-package, proxy, and Docker integration gates pass
+before a real Spark smoke. A real run must persist a complete event sequence,
+bind the redacted, persisted event-log digest into the result, and leave no owned Candidate
+containers, networks, volumes, or private authentication home. The original
+host authentication file is never mounted; per-run copies are discarded during
+verified cleanup.

@@ -6,18 +6,16 @@ pub const WORK_DOCKER_LIMITS: &[&str] = &[
     "--cpus",
     "4",
     "--tmpfs",
-    "/tmp:rw,noexec,nosuid,size=1g",
+    "/tmp:rw,exec,nosuid,size=1g",
 ];
 
-pub const JUDGE_DOCKER_LIMITS: &[&str] = &["--pids-limit", "256", "--memory", "16g", "--cpus", "2"];
+pub const JUDGE_DOCKER_LIMITS: &[&str] = &["--memory", "16g", "--cpus", "4"];
 
 pub const READ_ONLY_JUDGE_TMPFS: &[&str] = &[
-    "--pids-limit",
-    "256",
     "--memory",
     "16g",
     "--cpus",
-    "2",
+    "4",
     "--tmpfs",
     "/tmp:rw,exec,nosuid,size=4g",
 ];

@@ -17,7 +17,6 @@ tools:
   - parallel_task
   - dynamic_workflow
   - Skill
-max_steps: 256
 ---
 
 # A3S Code Candidate

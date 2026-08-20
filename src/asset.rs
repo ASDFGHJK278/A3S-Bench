@@ -127,17 +127,14 @@ impl LocalAssetPackage {
             }
             if let Some(raw) = line.trim().strip_prefix("max_steps:") {
                 anyhow::ensure!(value.is_none(), "model Candidate max_steps is duplicated");
-                value = Some(raw.trim().parse::<usize>()?);
+                let parsed: usize = raw.trim().parse()?;
+                anyhow::ensure!(parsed >= 1, "model Candidate max_steps must be >= 1");
+                value = Some(parsed);
             }
         }
         anyhow::ensure!(closed, "model Candidate frontmatter is not closed");
-        let value = value
-            .ok_or_else(|| anyhow::anyhow!("model Candidate definition must declare max_steps"))?;
-        anyhow::ensure!(
-            (1..=1000).contains(&value),
-            "model Candidate max_steps must be between 1 and 1000"
-        );
-        Ok(value)
+        // When max_steps is absent, default to usize::MAX (unlimited).
+        Ok(value.unwrap_or(usize::MAX))
     }
 }
 
@@ -330,7 +327,7 @@ mod tests {
             asset.definition_path.as_deref(),
             Some("prompts/controller.md")
         );
-        assert_eq!(asset.model_max_steps().unwrap(), 256);
+        assert_eq!(asset.model_max_steps().unwrap(), usize::MAX);
         assert!(asset.identity.starts_with("sha256:"));
         let runtime = std::fs::read_to_string(asset.root.join("runtime.acl")).unwrap();
         assert!(runtime.contains("implementation_version = \"5.3.4\""));

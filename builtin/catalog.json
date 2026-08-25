@@ -382,8 +382,8 @@
       "path": "tasks/order_addition_permutation_optimization",
       "provenance_ref": "provenance/edgebench.json#order_addition_permutation_optimization",
       "execution_class": "long_horizon",
-      "availability": "blocked",
-      "availability_reason": "judge_scoring_asset_hash_mismatch"
+      "availability": "ready",
+      "availability_reason": "bundled_oci_task"
     },
     {
       "admission": "quarantined",

@@ -4,6 +4,17 @@ use serde::Serialize;
 use sha2::{Digest, Sha256};
 
 #[derive(Serialize)]
+struct LegacyTaskLockIdentity<'a> {
+    schema: &'a str,
+    task_revision: &'a str,
+    artifact_digest: &'a str,
+    judge_revision: &'a str,
+    judge_artifact_digest: &'a str,
+    judge_model: &'a Option<String>,
+    resolved_images: &'a std::collections::BTreeMap<String, String>,
+}
+
+#[derive(Serialize)]
 struct TaskLockIdentity<'a> {
     schema: &'a str,
     task_revision: &'a str,
@@ -12,6 +23,8 @@ struct TaskLockIdentity<'a> {
     judge_artifact_digest: &'a str,
     judge_model: &'a Option<String>,
     resolved_images: &'a std::collections::BTreeMap<String, String>,
+    resources: &'a Option<crate::task::TaskResources>,
+    workspace_imports: &'a Option<Vec<crate::task::WorkWorkspaceImport>>,
 }
 
 #[derive(Serialize)]
@@ -36,15 +49,29 @@ struct LegacyCandidateLockIdentity<'a> {
 }
 
 pub fn task(value: &TaskLock) -> Result<String> {
-    digest(&TaskLockIdentity {
-        schema: &value.schema,
-        task_revision: &value.task_revision,
-        artifact_digest: &value.artifact_digest,
-        judge_revision: &value.judge_revision,
-        judge_artifact_digest: &value.judge_artifact_digest,
-        judge_model: &value.judge_model,
-        resolved_images: &value.resolved_images,
-    })
+    if value.schema == "a3s.bench.task-lock.v2" {
+        digest(&TaskLockIdentity {
+            schema: &value.schema,
+            task_revision: &value.task_revision,
+            artifact_digest: &value.artifact_digest,
+            judge_revision: &value.judge_revision,
+            judge_artifact_digest: &value.judge_artifact_digest,
+            judge_model: &value.judge_model,
+            resolved_images: &value.resolved_images,
+            resources: &value.resources,
+            workspace_imports: &value.workspace_imports,
+        })
+    } else {
+        digest(&LegacyTaskLockIdentity {
+            schema: &value.schema,
+            task_revision: &value.task_revision,
+            artifact_digest: &value.artifact_digest,
+            judge_revision: &value.judge_revision,
+            judge_artifact_digest: &value.judge_artifact_digest,
+            judge_model: &value.judge_model,
+            resolved_images: &value.resolved_images,
+        })
+    }
 }
 
 pub fn candidate(value: &CandidateLock) -> Result<String> {
@@ -134,12 +161,64 @@ mod tests {
             judge_artifact_digest: format!("sha256:{}", "e".repeat(64)),
             judge_model: None,
             resolved_images: BTreeMap::new(),
+            resources: None,
+            workspace_imports: None,
         };
         let first = task(&task_lock).unwrap();
         validate_digest(&first).unwrap();
         let mut with_model = task_lock;
         with_model.judge_model = Some("custom/grader".into());
         assert_ne!(first, task(&with_model).unwrap());
+    }
+
+    #[test]
+    fn historical_task_v1_identity_vector_is_unchanged() {
+        let value = TaskLock {
+            schema: "a3s.bench.task-lock.v1".into(),
+            lock_digest: String::new(),
+            task_revision: format!("sha256:{}", "c".repeat(64)),
+            artifact_digest: format!("sha256:{}", "c".repeat(64)),
+            judge_revision: format!("sha256:{}", "d".repeat(64)),
+            judge_artifact_digest: format!("sha256:{}", "e".repeat(64)),
+            judge_model: None,
+            resolved_images: BTreeMap::new(),
+            resources: None,
+            workspace_imports: None,
+        };
+        assert_eq!(
+            task(&value).unwrap(),
+            "sha256:7b5f8996f5e81032293be4d6345182c8e858049687f74782e879317a622c6e15"
+        );
+    }
+
+    #[test]
+    fn task_v2_identity_covers_resources() {
+        let mut value = TaskLock {
+            schema: "a3s.bench.task-lock.v2".into(),
+            lock_digest: String::new(),
+            task_revision: format!("sha256:{}", "c".repeat(64)),
+            artifact_digest: format!("sha256:{}", "c".repeat(64)),
+            judge_revision: format!("sha256:{}", "d".repeat(64)),
+            judge_artifact_digest: format!("sha256:{}", "e".repeat(64)),
+            judge_model: None,
+            resolved_images: BTreeMap::new(),
+            resources: Some(crate::task::TaskResources::default()),
+            workspace_imports: Some(Vec::new()),
+        };
+        let first = task(&value).unwrap();
+        value.resources.as_mut().unwrap().work.memory_bytes += 1;
+        assert_ne!(first, task(&value).unwrap());
+        let resource_digest = task(&value).unwrap();
+        value
+            .workspace_imports
+            .as_mut()
+            .unwrap()
+            .push(crate::task::WorkWorkspaceImport {
+                name: "cache".into(),
+                source_path: "/root/cache".into(),
+                target_path: ".cache".into(),
+            });
+        assert_ne!(resource_digest, task(&value).unwrap());
     }
 
     #[test]

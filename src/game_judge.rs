@@ -16,7 +16,11 @@ pub struct GameSession {
 }
 
 impl GameSession {
-    pub fn start(source: &LegacyJudgeSource, state_root: &Path) -> Result<Self> {
+    pub fn start(
+        source: &LegacyJudgeSource,
+        resources: crate::task::RoleResources,
+        state_root: &Path,
+    ) -> Result<Self> {
         anyhow::ensure!(source.mode == "game_server", "Judge is not a game server");
         let source_command = source
             .game_server_command
@@ -45,7 +49,7 @@ impl GameSession {
             process.args(["--platform", platform]);
         }
         let output = process
-            .args(crate::runtime_profile::JUDGE_DOCKER_LIMITS)
+            .args(crate::runtime_profile::judge_docker_args(resources))
             .args(crate::runtime_profile::READ_ONLY_JUDGE_TMPFS)
             .args([
                 "--name",
@@ -225,7 +229,7 @@ mod tests {
         .unwrap();
         let source = task.legacy_judge.as_ref().unwrap();
         let state = tempfile::tempdir().unwrap();
-        let session = GameSession::start(source, state.path()).unwrap();
+        let session = GameSession::start(source, task.resources.judge, state.path()).unwrap();
         let new_game = session.start_game().unwrap_or_else(|error| {
             let output = Command::new("docker")
                 .args(["logs", &session.container])

@@ -14,6 +14,10 @@ pub struct TaskLock {
     pub judge_artifact_digest: String,
     pub judge_model: Option<String>,
     pub resolved_images: BTreeMap<String, String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub resources: Option<crate::task::TaskResources>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub workspace_imports: Option<Vec<crate::task::WorkWorkspaceImport>>,
 }
 
 pub struct LoadedTaskLock {
@@ -62,6 +66,10 @@ pub fn create_task_with_provider(
     let digest = crate::task_snapshot::capture(root, state_root)?;
     let captured = crate::task_snapshot::artifact_path(state_root, &digest)?;
     let task = crate::task::load_local(&captured)?;
+    anyhow::ensure!(
+        runtime_provider != crate::os_runtime::PROVIDER || task.schema == "a3s-bench/task/v1",
+        "os-runtime cannot enforce explicit a3s-bench/task/v2 resources; use the Docker Runtime"
+    );
     let requires_judge_model = task
         .legacy_judge
         .as_ref()
@@ -92,8 +100,17 @@ pub fn create_task_with_provider(
             resolved_images.insert(image_key(reference, platform), resolved.immutable_ref);
         }
     }
+    let (lock_schema, resources, workspace_imports) = match task.schema.as_str() {
+        "a3s-bench/task/v1" => ("a3s.bench.task-lock.v1", None, None),
+        "a3s-bench/task/v2" => (
+            "a3s.bench.task-lock.v2",
+            Some(task.resources),
+            Some(task.work_workspace_imports.clone()),
+        ),
+        _ => unreachable!("Task schema was validated"),
+    };
     let mut value = TaskLock {
-        schema: "a3s.bench.task-lock.v1".into(),
+        schema: lock_schema.into(),
         lock_digest: String::new(),
         task_revision: digest.clone(),
         artifact_digest: digest,
@@ -101,6 +118,8 @@ pub fn create_task_with_provider(
         judge_artifact_digest,
         judge_model,
         resolved_images,
+        resources,
+        workspace_imports,
     };
     value.lock_digest = crate::lock_identity::task(&value)?;
     write_exclusive(output, &serde_json::to_vec_pretty(&value)?)?;
@@ -238,7 +257,10 @@ pub fn create_candidate_with_codex_default(
 pub fn load_task(path: &Path, state_root: &Path) -> Result<LoadedTaskLock> {
     let value: TaskLock = serde_json::from_slice(&read_lock_file(path)?)?;
     anyhow::ensure!(
-        value.schema == "a3s.bench.task-lock.v1",
+        matches!(
+            value.schema.as_str(),
+            "a3s.bench.task-lock.v1" | "a3s.bench.task-lock.v2"
+        ),
         "invalid TaskLock schema"
     );
     crate::lock_identity::validate_digest(&value.lock_digest)?;
@@ -258,6 +280,29 @@ pub fn load_task(path: &Path, state_root: &Path) -> Result<LoadedTaskLock> {
     crate::task_snapshot::verify(&artifact, &value.artifact_digest)
         .context("locked Task artifact is unavailable or corrupt")?;
     let task = crate::task::load_local(&artifact).context("locked Task artifact is invalid")?;
+    match (value.schema.as_str(), task.schema.as_str()) {
+        ("a3s.bench.task-lock.v1", "a3s-bench/task/v1") => anyhow::ensure!(
+            value.resources.is_none() && value.workspace_imports.is_none(),
+            "TaskLock v1 must not contain resources or workspace imports"
+        ),
+        ("a3s.bench.task-lock.v2", "a3s-bench/task/v2") => {
+            anyhow::ensure!(
+                value.resources == Some(task.resources),
+                "TaskLock resources do not match the locked Task artifact"
+            );
+            anyhow::ensure!(
+                value.workspace_imports.as_ref() == Some(&task.work_workspace_imports),
+                "TaskLock workspace imports do not match the locked Task artifact"
+            );
+        }
+        ("a3s.bench.task-lock.v1", "a3s-bench/task/v2") => {
+            anyhow::bail!("TaskLock v1 cannot bind a task/v2 artifact")
+        }
+        ("a3s.bench.task-lock.v2", "a3s-bench/task/v1") => {
+            anyhow::bail!("TaskLock v2 cannot bind a task/v1 artifact")
+        }
+        _ => unreachable!("Task and TaskLock schemas were validated"),
+    }
     let requires_judge_model = task
         .legacy_judge
         .as_ref()

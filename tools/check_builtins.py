@@ -14,11 +14,34 @@ ROOT = Path(__file__).resolve().parents[1] / "builtin"
 PROVENANCE_PATH = ROOT / "provenance" / "edgebench.json"
 EXPECTED_DATASET_COMMIT = "47846a4c3669ad447e0ea984833b0d352460c5f9"
 EXPECTED_HARNESS_COMMIT = "f59bcb0f024d4bc8baedeac271306050e4bb0d33"
+EXPECTED_EXPERIMENT_PATH = "examples/all-tasks-k8s/experiment-codex.yaml"
+EXPECTED_EXPERIMENT_SHA256 = (
+    "sha256:6cf7d41bc67f765adbd458409209e6af02bbb9a53020cf366511707b3fc45b33"
+)
 EXPECTED_TASKS = 51
 EXPECTED_MODES = {"batch": 48, "game_server": 3}
-EXPECTED_BLOCKED_TASKS = {
-    "order_addition_permutation_optimization": "judge_scoring_asset_hash_mismatch",
+EXPECTED_BLOCKED_TASKS = {}
+EXPECTED_RESOURCE_PROFILES = {
+    (4, 16 * 1024**3, 4, 8 * 1024**3): 42,
+    (4, 16 * 1024**3, 4, 16 * 1024**3): 1,
+    (8, 16 * 1024**3, 8, 16 * 1024**3): 7,
+    (16, 16 * 1024**3, 16, 16 * 1024**3): 1,
 }
+EXPECTED_WORKSPACE_IMPORTS = {
+    "exchange_core_throughput": [
+        {
+            "name": "maven_repository",
+            "source_path": "/root/.m2/repository",
+            "target_path": "/home/agent/.m2/repository",
+        }
+    ]
+}
+ORDER_ADDITION_OLD_HELPER_SHA256 = (
+    "3023b9a449119e862d4ca86d3ab45599e2496e182be82959a642522f915dbbac"
+)
+ORDER_ADDITION_ACTUAL_HELPER_SHA256 = (
+    "337837af7067b3dae8d4ef068d26d8dd8ff779f9a627d95451af2ca411c99630"
+)
 
 
 def sha256(path: Path) -> str:
@@ -30,6 +53,29 @@ def require(condition: bool, message: str) -> None:
         raise AssertionError(message)
 
 
+def acl_block(source: str, name: str) -> str:
+    match = re.search(rf"^\s*{re.escape(name)}\s*\{{\s*$", source, re.MULTILINE)
+    if match is None:
+        raise AssertionError(f"missing ACL block: {name}")
+    start = match.start()
+    depth = 0
+    for index in range(match.start(), len(source)):
+        if source[index] == "{":
+            depth += 1
+        elif source[index] == "}":
+            depth -= 1
+            if depth == 0:
+                return source[start : index + 1]
+    raise AssertionError(f"unterminated ACL block: {name}")
+
+
+def require_acl_integer(block: str, field: str, expected: int, task_id: str) -> None:
+    values = re.findall(
+        rf"^\s*{re.escape(field)}\s*=\s*([0-9]+)\s*$", block, re.MULTILINE
+    )
+    require(values == [str(expected)], f"{field}: {task_id}")
+
+
 def main() -> None:
     catalog = json.loads((ROOT / "catalog.json").read_text(encoding="utf-8"))
     provenance = json.loads(PROVENANCE_PATH.read_text(encoding="utf-8"))
@@ -37,6 +83,14 @@ def main() -> None:
     require(set(catalog) == {"schema", "tasks"}, "catalog fields")
     require(provenance["dataset"]["commit"] == EXPECTED_DATASET_COMMIT, "dataset commit")
     require(provenance["harness"]["commit"] == EXPECTED_HARNESS_COMMIT, "harness commit")
+    require(
+        provenance["harness"]["experiment"]
+        == {
+            "path": EXPECTED_EXPERIMENT_PATH,
+            "sha256": EXPECTED_EXPERIMENT_SHA256,
+        },
+        "pinned harness experiment",
+    )
     require(provenance["task_count"] == EXPECTED_TASKS, "provenance task count")
     require((ROOT / "licenses" / "CC-BY-4.0.txt").is_file(), "CC BY license")
     require((ROOT / "licenses" / "Apache-2.0.txt").is_file(), "Apache license")
@@ -56,6 +110,7 @@ def main() -> None:
     require(set(records) == set(ids), "provenance records")
 
     modes: Counter[str] = Counter()
+    resource_profiles: Counter[tuple[int, int, int, int]] = Counter()
     model_gateway_count = 0
     for entry in entries:
         task_id = entry["id"]
@@ -104,6 +159,37 @@ def main() -> None:
         record = records[task_id]
         require(re.fullmatch(r"sha256:[0-9a-f]{64}", record["source_sha256"]) is not None, f"source digest: {task_id}")
         require(record["modified"] is True, f"adaptation flag: {task_id}")
+        resources = record["resolved_resources"]
+        require(set(resources) == {"work", "judge"}, f"resource roles: {task_id}")
+        for role in ("work", "judge"):
+            require(
+                set(resources[role]) == {"cpu_limit", "memory_bytes"},
+                f"resource fields: {task_id}/{role}",
+            )
+            require(
+                type(resources[role]["cpu_limit"]) is int
+                and resources[role]["cpu_limit"] > 0,
+                f"CPU resource: {task_id}/{role}",
+            )
+            require(
+                type(resources[role]["memory_bytes"]) is int
+                and resources[role]["memory_bytes"]
+                in {8 * 1024**3, 16 * 1024**3},
+                f"memory resource: {task_id}/{role}",
+            )
+        resource_profiles[
+            (
+                resources["work"]["cpu_limit"],
+                resources["work"]["memory_bytes"],
+                resources["judge"]["cpu_limit"],
+                resources["judge"]["memory_bytes"],
+            )
+        ] += 1
+        expected_imports = EXPECTED_WORKSPACE_IMPORTS.get(task_id, [])
+        require(
+            record.get("workspace_imports", []) == expected_imports,
+            f"workspace import provenance: {task_id}",
+        )
         for relative, path in generated.items():
             require(
                 record["generated_sha256"][relative] == f"sha256:{sha256(path)}",
@@ -138,6 +224,35 @@ def main() -> None:
         require(asset_acl.count("{") == asset_acl.count("}"), f"asset braces: {task_id}")
         require("dev_visible" not in task_acl, f"legacy dev visibility field: {task_id}")
         require(re.search(rf'^bench "{re.escape(task_id)}" \{{$', task_acl, re.MULTILINE) is not None, f"ACL id: {task_id}")
+        require('schema  = "a3s-bench/task/v2"' in task_acl, f"ACL schema: {task_id}")
+        work_acl = acl_block(task_acl, "work")
+        judge_acl = acl_block(task_acl, "judge")
+        parsed_imports = [
+            {"name": name, "source_path": source_path, "target_path": target_path}
+            for name, source_path, target_path in re.findall(
+                r'workspace_import\s+"([^"]+)"\s*\{\s*'
+                r'source_path\s*=\s*"([^"]+)"\s*'
+                r'target_path\s*=\s*"([^"]+)"\s*\}',
+                work_acl,
+            )
+        ]
+        require(
+            work_acl.count("workspace_import") == len(expected_imports)
+            and parsed_imports == expected_imports,
+            f"workspace imports: {task_id}",
+        )
+        require_acl_integer(
+            work_acl, "cpu_limit", resources["work"]["cpu_limit"], task_id
+        )
+        require_acl_integer(
+            work_acl, "memory_bytes", resources["work"]["memory_bytes"], task_id
+        )
+        require_acl_integer(
+            judge_acl, "cpu_limit", resources["judge"]["cpu_limit"], task_id
+        )
+        require_acl_integer(
+            judge_acl, "memory_bytes", resources["judge"]["memory_bytes"], task_id
+        )
         require('metric "score"' in task_acl, f"native metric: {task_id}")
         require(re.search(r'^\s*asset\s*=\s*"private/judge"$', task_acl, re.MULTILINE) is not None, f"task Judge ref: {task_id}")
         require('version = "a3s.asset.v1"' in asset_acl, f"asset version: {task_id}")
@@ -159,10 +274,30 @@ def main() -> None:
         require(descriptor["kind"] == "oci", f"descriptor kind: {task_id}")
         require(descriptor["image"]["platform"] == "linux/amd64", f"platform: {task_id}")
         require("upstream" not in descriptor, f"duplicated provenance: {task_id}")
+        if task_id == "order_addition_permutation_optimization":
+            source_command = descriptor["evaluation"]["source_command"]
+            require(
+                source_command.startswith(
+                    "cd /home/workspace/complex_job_scheduling && python -c "
+                ),
+                "Order Addition Judge working directory",
+            )
+            require(
+                source_command.endswith(
+                    "&& python -m pytest tests/test_final_result.py -s -v"
+                ),
+                "Order Addition original pytest command",
+            )
+            require(
+                ORDER_ADDITION_OLD_HELPER_SHA256 in source_command
+                and ORDER_ADDITION_ACTUAL_HELPER_SHA256 in source_command,
+                "Order Addition helper hash adaptation",
+            )
         modes[descriptor["evaluation"]["mode"]] += 1
         model_gateway_count += int("model_gateway" in descriptor["requirements"])
 
     require(dict(modes) == EXPECTED_MODES, "Judge modes")
+    require(dict(resource_profiles) == EXPECTED_RESOURCE_PROFILES, "resource profiles")
     require(model_gateway_count == 1, "model-gateway Judge count")
     forbidden = [path for path in ROOT.rglob("*") if ".a3s-bench" in path.parts]
     require(not forbidden, "forbidden .a3s-bench path")

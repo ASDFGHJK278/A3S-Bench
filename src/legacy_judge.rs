@@ -18,7 +18,9 @@ pub fn execute(
     );
     let mut command = Command::new("docker");
     configure_judge_container(&mut command);
-    command.args(crate::runtime_profile::JUDGE_DOCKER_LIMITS);
+    command.args(crate::runtime_profile::judge_docker_args(
+        task.resources.judge,
+    ));
     configure_model_gateway(&mut command, source.requires_model_gateway, model)?;
     if let Some(platform) = source.platform.as_deref() {
         command.args(["--platform", platform]);
@@ -512,13 +514,7 @@ fn piecewise(raw: f64, spec: &Value, minimize: bool, logarithmic: bool) -> Resul
 
 pub(crate) fn canonical_ratio(value: f64) -> String {
     let value = value.clamp(0.0, 1.0);
-    let formatted = format!("{value:.10}");
-    let trimmed = formatted.trim_end_matches('0').trim_end_matches('.');
-    if trimmed.is_empty() {
-        "0".into()
-    } else {
-        trimmed.into()
-    }
+    value.to_string()
 }
 
 #[cfg(test)]
@@ -541,6 +537,13 @@ mod tests {
         .unwrap()
         .unwrap();
         assert_eq!(structured["score"], 0.75);
+    }
+
+    #[test]
+    fn canonical_ratio_preserves_small_nonzero_edgebench_scores() {
+        assert_eq!(canonical_ratio(0.1), "0.1");
+        assert_eq!(canonical_ratio(0.000000000033), "0.000000000033");
+        assert_eq!(canonical_ratio(0.0), "0");
     }
 
     fn structured_source() -> LegacyJudgeSource {
@@ -635,6 +638,20 @@ mod tests {
     }
 
     #[test]
+    fn pytest_v_keeps_total_score_when_an_unrelated_test_fails() {
+        let source = pytest_v_source(Some(
+            serde_json::json!({"kind":"linear","lower":0.0,"upper":100.0}),
+        ));
+        let output = concat!(
+            "tests/test_final_result.py::test_private_judge_files_are_available FAILED\n",
+            "tests/test_final_result.py::test_final_result_is_valid_permutation_and_cost ",
+            "TOTAL_SCORE 0.0000000033\nPASSED\n",
+            "========================= 1 failed, 4 passed =========================\n",
+        );
+        assert_eq!(parse_score(&source, output).unwrap(), 0.000000000033);
+    }
+
+    #[test]
     fn pytest_v_missing_total_score_falls_back_at_full_pass_rate() {
         let source = pytest_v_source(Some(
             serde_json::json!({"kind":"linear","lower":0.0,"upper":100.0}),
@@ -682,6 +699,16 @@ mod tests {
         ));
         assert_eq!(parse_score(&source, "TOTAL_SCORE 2.5e-1").unwrap(), 0.25);
         assert_eq!(parse_score(&source, "no score").unwrap(), 0.0);
+    }
+
+    #[test]
+    fn exchange_score_sum_exact_regression_normalizes_below_baseline_to_zero() {
+        let source = score_sum_source(Some(serde_json::json!({
+            "kind": "log_max",
+            "baseline": 2090.634594076933,
+            "expert": 6000.0
+        })));
+        assert_eq!(parse_score(&source, "TOTAL_SCORE 1078").unwrap(), 0.0);
     }
 
     #[test]

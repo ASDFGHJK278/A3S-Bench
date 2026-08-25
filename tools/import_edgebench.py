@@ -16,14 +16,91 @@ import subprocess
 from pathlib import Path
 from typing import Any
 
+import yaml
+
 
 DATASET_REPOSITORY = "https://huggingface.co/datasets/ByteDance-Seed/EdgeBench"
 DATASET_COMMIT = "47846a4c3669ad447e0ea984833b0d352460c5f9"
 HARNESS_REPOSITORY = "https://github.com/ByteDance-Seed/EdgeBench"
 HARNESS_COMMIT = "f59bcb0f024d4bc8baedeac271306050e4bb0d33"
+EXPERIMENT_PATH = "examples/all-tasks-k8s/experiment-codex.yaml"
+EXPERIMENT_SHA256 = "6cf7d41bc67f765adbd458409209e6af02bbb9a53020cf366511707b3fc45b33"
 TASK_COUNT = 51
 MODEL_GATEWAY_TASKS = {"college_english_exam_bank"}
 PROVENANCE_REF = "provenance/edgebench.json"
+RESOURCE_FIELDS = (
+    "work_cpu_limit",
+    "work_mem_limit",
+    "judge_cpu_limit",
+    "judge_mem_limit",
+)
+MEMORY_BYTES = {
+    "8g": 8 * 1024**3,
+    "16g": 16 * 1024**3,
+}
+WORKSPACE_IMPORTS = {
+    "exchange_core_throughput": [
+        {
+            "name": "maven_repository",
+            "source_path": "/root/.m2/repository",
+            "target_path": "/home/agent/.m2/repository",
+        }
+    ]
+}
+JUDGE_COMMAND_ADAPTATIONS = {
+    "order_addition_permutation_optimization": (
+        (
+            "python -m pytest tests/test_final_result.py -s -v",
+            "python -c 'from pathlib import Path; "
+            "p = Path(\"tests/test_final_result.py\"); "
+            "data = p.read_text(encoding=\"utf-8\"); "
+            "old = \"3023b9a449119e862d4ca86d3ab45599e2496e182be82959a642522f915dbbac\"; "
+            "new = \"337837af7067b3dae8d4ef068d26d8dd8ff779f9a627d95451af2ca411c99630\"; "
+            "assert data.count(old) == 1, \"stale helper hash adaptation mismatch\"; "
+            "p.write_text(data.replace(old, new, 1), encoding=\"utf-8\")' && "
+            "python -m pytest tests/test_final_result.py -s -v",
+        ),
+    ),
+    "git_rewrite_in_zig": (
+        (
+            "mkdir -p /logs/verifier /tmp/verifier && ",
+            "mkdir -p /logs/verifier && ",
+        ),
+        (" && ln -sfn /tmp/verifier /logs/verifier 2>/dev/null", ""),
+        (
+            "bash /opt/tests/test.sh >/tmp/verifier.log 2>&1 || true; "
+            "cat /tmp/verifier.log >&2;",
+            "bash /opt/tests/test.sh || true; "
+            "cat /logs/verifier/verifier.log >&2 2>/dev/null || true;",
+        ),
+    ),
+    "rust_multicrate_reconstruction": (
+        (
+            "cp -a agent-start /tmp/cas_submitted_agent_start",
+            "cp -a --no-preserve=ownership agent-start "
+            "/tmp/cas_submitted_agent_start",
+        ),
+        (
+            "tar -xzf cas_rust_benchmark.tar.gz",
+            "tar --no-same-owner -xzf cas_rust_benchmark.tar.gz",
+        ),
+        (
+            "cp -a /tmp/cas_eval/cas_rust_benchmark/workspace/. /tmp/cas_eval/run/",
+            "cp -a --no-preserve=ownership "
+            "/tmp/cas_eval/cas_rust_benchmark/workspace/. /tmp/cas_eval/run/",
+        ),
+        (
+            "cp -a /tmp/cas_eval/cas_rust_benchmark/judge/. /tmp/cas_eval/run/",
+            "cp -a --no-preserve=ownership "
+            "/tmp/cas_eval/cas_rust_benchmark/judge/. /tmp/cas_eval/run/",
+        ),
+        (
+            "cp -a /tmp/cas_submitted_agent_start/. /tmp/cas_eval/run/agent-start/",
+            "cp -a --no-preserve=ownership "
+            "/tmp/cas_submitted_agent_start/. /tmp/cas_eval/run/agent-start/",
+        ),
+    ),
+}
 
 
 def parse_args() -> argparse.Namespace:
@@ -56,8 +133,10 @@ def sha256_file(path: Path) -> str:
     return sha256_bytes(path.read_bytes())
 
 
-def json_text(value: Any) -> str:
-    return json.dumps(value, ensure_ascii=False, indent=2, sort_keys=True) + "\n"
+def json_text(value: Any, *, sort_keys: bool = True) -> str:
+    return (
+        json.dumps(value, ensure_ascii=False, indent=2, sort_keys=sort_keys) + "\n"
+    )
 
 
 def write_text(path: Path, value: str) -> None:
@@ -86,6 +165,96 @@ def normalized_excludes(task: dict[str, Any]) -> list[str]:
     return [value.rstrip("/") for value in task.get("submit_exclude", ["tests/"])]
 
 
+def parse_cpu_limit(value: Any, source: str) -> int:
+    if type(value) is not int or value <= 0:
+        raise SystemExit(f"{source} must be a positive integer CPU count, got {value!r}")
+    return value
+
+
+def parse_memory_bytes(value: Any, source: str) -> int:
+    if type(value) is not str or value not in MEMORY_BYTES:
+        choices = ", ".join(sorted(MEMORY_BYTES))
+        raise SystemExit(f"{source} must be one of {choices}, got {value!r}")
+    return MEMORY_BYTES[value]
+
+
+def adapt_judge_command(task_id: str, command: str) -> str:
+    for old, new in JUDGE_COMMAND_ADAPTATIONS.get(task_id, ()):
+        count = command.count(old)
+        if count != 1:
+            raise SystemExit(
+                f"Judge command adaptation mismatch for {task_id}: "
+                f"expected one {old!r}, found {count}"
+            )
+        command = command.replace(old, new, 1)
+    return command
+
+
+def load_experiment_resources(
+    harness_dir: Path, task_ids: set[str]
+) -> tuple[Path, dict[str, dict[str, dict[str, int]]]]:
+    experiment_path = harness_dir / EXPERIMENT_PATH
+    if not experiment_path.is_file():
+        raise SystemExit(f"missing pinned experiment: {experiment_path}")
+    experiment_sha256 = sha256_file(experiment_path)
+    if experiment_sha256 != EXPERIMENT_SHA256:
+        raise SystemExit(
+            "experiment hash mismatch: "
+            f"expected {EXPERIMENT_SHA256}, got {experiment_sha256}"
+        )
+    experiment = yaml.safe_load(experiment_path.read_text(encoding="utf-8"))
+    if not isinstance(experiment, dict):
+        raise SystemExit("experiment root must be a mapping")
+    defaults = experiment.get("defaults")
+    overrides = experiment.get("tasks")
+    if not isinstance(defaults, dict):
+        raise SystemExit("experiment defaults must be a mapping")
+    if not isinstance(overrides, dict):
+        raise SystemExit("experiment tasks must be a mapping")
+    experiment_ids = set(overrides)
+    if experiment_ids != task_ids:
+        missing = sorted(task_ids - experiment_ids)
+        extra = sorted(experiment_ids - task_ids)
+        raise SystemExit(
+            f"experiment/dataset task mismatch: missing={missing}, extra={extra}"
+        )
+
+    resources: dict[str, dict[str, dict[str, int]]] = {}
+    for task_id in sorted(task_ids):
+        task_override = overrides[task_id]
+        if task_override is None:
+            task_override = {}
+        if not isinstance(task_override, dict):
+            raise SystemExit(f"experiment task {task_id} must be a mapping")
+        resolved: dict[str, Any] = {}
+        for field in RESOURCE_FIELDS:
+            if field in task_override:
+                resolved[field] = task_override[field]
+            elif field in defaults:
+                resolved[field] = defaults[field]
+            else:
+                raise SystemExit(f"experiment resource is missing: {task_id}.{field}")
+        resources[task_id] = {
+            "work": {
+                "cpu_limit": parse_cpu_limit(
+                    resolved["work_cpu_limit"], f"{task_id}.work_cpu_limit"
+                ),
+                "memory_bytes": parse_memory_bytes(
+                    resolved["work_mem_limit"], f"{task_id}.work_mem_limit"
+                ),
+            },
+            "judge": {
+                "cpu_limit": parse_cpu_limit(
+                    resolved["judge_cpu_limit"], f"{task_id}.judge_cpu_limit"
+                ),
+                "memory_bytes": parse_memory_bytes(
+                    resolved["judge_mem_limit"], f"{task_id}.judge_mem_limit"
+                ),
+            },
+        }
+    return experiment_path, resources
+
+
 def judge_mode(task: dict[str, Any]) -> str:
     return "game_server" if task.get("game_mode", False) else "batch"
 
@@ -99,7 +268,9 @@ def judge_requirements(task: dict[str, Any]) -> list[str]:
     return requirements
 
 
-def render_task_acl(task: dict[str, Any]) -> str:
+def render_task_acl(
+    task: dict[str, Any], resources: dict[str, dict[str, int]]
+) -> str:
     task_id = task["task_id"]
     work_ref = image_ref(task_id, "work", task["work"]["image_tag"])
     network = "public_internet" if task.get("internet", True) else "none"
@@ -110,9 +281,16 @@ def render_task_acl(task: dict[str, Any]) -> str:
     # solving time (experiment.yaml defaults.timeout).  The per-task
     # eval_timeout is the judge-script budget, NOT the agent budget.
     agent_timeout = 43200
+    workspace_imports = "".join(
+        f'''\n\n    workspace_import {acl_string(spec["name"])} {{
+      source_path = {acl_string(spec["source_path"])}
+      target_path = {acl_string(spec["target_path"])}
+    }}'''
+        for spec in WORKSPACE_IMPORTS.get(task_id, [])
+    )
     return f'''# Third-party source details: ../../{PROVENANCE_REF}
 bench {acl_string(task_id)} {{
-  schema  = "a3s-bench/task/v1"
+  schema  = "a3s-bench/task/v2"
   version = "0.1.0"
 
   name        = {acl_string(task["name"])}
@@ -128,6 +306,9 @@ bench {acl_string(task_id)} {{
   }}
 
   work {{
+    cpu_limit    = {resources["work"]["cpu_limit"]}
+    memory_bytes = {resources["work"]["memory_bytes"]}{workspace_imports}
+
     image {{
       ref = {acl_string(work_ref)}
     }}
@@ -142,6 +323,8 @@ bench {acl_string(task_id)} {{
   judge {{
     asset                = "private/judge"
     solution_timeout_sec = {agent_timeout}
+    cpu_limit            = {resources["judge"]["cpu_limit"]}
+    memory_bytes          = {resources["judge"]["memory_bytes"]}
   }}
 
   metric "score" {{
@@ -236,7 +419,9 @@ def judge_descriptor(task: dict[str, Any]) -> dict[str, Any]:
         },
         "evaluation": {
             "mode": judge_mode(task),
-            "source_command": judge.get("eval_cmd", ""),
+            "source_command": adapt_judge_command(
+                task_id, judge.get("eval_cmd", "")
+            ),
             "source_game_server_command": judge.get("game_server_cmd"),
             "timeout_sec": int(judge.get("eval_timeout", 600)),
         },
@@ -255,10 +440,13 @@ def judge_descriptor(task: dict[str, Any]) -> dict[str, Any]:
 def catalog_entry(task: dict[str, Any]) -> dict[str, Any]:
     task_id = task["task_id"]
     return {
-        "id": task_id,
-        "path": f"tasks/{task_id}",
-        "name": task["name"],
+        "admission": "quarantined",
+        "admission_reason": "official_evidence_incomplete",
         "category": task["category"],
+        "id": task_id,
+        "name": task["name"],
+        "path": f"tasks/{task_id}",
+        "provenance_ref": f"{PROVENANCE_REF}#{task_id}",
         "execution_class": "long_horizon",
         "availability": "ready",
         "availability_reason": (
@@ -266,9 +454,6 @@ def catalog_entry(task: dict[str, Any]) -> dict[str, Any]:
             if task_id == "college_english_exam_bank"
             else "bundled_oci_task"
         ),
-        "admission": "quarantined",
-        "admission_reason": "official_evidence_incomplete",
-        "provenance_ref": f"{PROVENANCE_REF}#{task_id}",
     }
 
 
@@ -353,6 +538,8 @@ def main() -> None:
         ids.add(task_id)
         tasks.append((task, task_path))
 
+    experiment_path, task_resources = load_experiment_resources(harness_dir, ids)
+
     output.mkdir(parents=True, exist_ok=True)
     existing_entries = load_existing_catalog(output)
     managed_ids = load_managed_ids(output)
@@ -382,7 +569,8 @@ def main() -> None:
         agent_path = asset_root / "agent.md"
         descriptor_path = asset_root / "judge.source.json"
 
-        write_text(task_acl_path, render_task_acl(task))
+        resources = task_resources[task_id]
+        write_text(task_acl_path, render_task_acl(task, resources))
         write_text(prompt_path, task["work"]["agent_query"])
         write_text(asset_acl_path, render_asset_acl(task))
         write_text(agent_path, render_agent_md(task))
@@ -396,6 +584,12 @@ def main() -> None:
                 "source_sha256": f"sha256:{sha256_file(task_path)}",
                 "license": "CC-BY-4.0",
                 "modified": True,
+                "resolved_resources": resources,
+                **(
+                    {"workspace_imports": WORKSPACE_IMPORTS[task_id]}
+                    if task_id in WORKSPACE_IMPORTS
+                    else {}
+                ),
                 "generated_sha256": {
                     "task.acl": f"sha256:{sha256_file(task_acl_path)}",
                     "public/prompt.md": f"sha256:{sha256_file(prompt_path)}",
@@ -409,9 +603,10 @@ def main() -> None:
     other_entries = [entry for entry in existing_entries if entry["id"] not in managed_ids]
     catalog = {
         "schema": "a3s-bench/builtin-catalog/v1",
-        "tasks": sorted(other_entries + new_entries, key=lambda entry: entry["id"]),
+        "tasks": other_entries
+        + sorted(new_entries, key=lambda entry: entry["id"]),
     }
-    write_text(output / "catalog.json", json_text(catalog))
+    write_text(output / "catalog.json", json_text(catalog, sort_keys=False))
 
     provenance = {
         "schema": "a3s-bench/builtin-provenance/v1",
@@ -425,6 +620,10 @@ def main() -> None:
             "repository": HARNESS_REPOSITORY,
             "commit": HARNESS_COMMIT,
             "license": "Apache-2.0",
+            "experiment": {
+                "path": experiment_path.relative_to(harness_dir).as_posix(),
+                "sha256": f"sha256:{sha256_file(experiment_path)}",
+            },
         },
         "task_count": len(source_records),
         "records": source_records,
@@ -434,6 +633,9 @@ def main() -> None:
             "Generated one quarantined A3S Judge Agent Asset at private/judge per task.",
             "Marked the terminal hidden bundle unavailable; no upstream hidden bytes were copied or represented as an empty bundle.",
             "Renamed the normalized primary metric to the native name score.",
+            "Resolved work and Judge resource limits from the pinned official Codex experiment.",
+            "Imported the Exchange Core Maven repository from the protected Work image into an isolated per-run Candidate volume at the observed agent-user Maven repository path without copying sibling Maven configuration.",
+            "Reapplied A3S fail-closed Judge command adaptations for the stale Order Addition helper hash and the git_rewrite_in_zig and rust_multicrate_reconstruction runtime incompatibilities.",
         ],
         "redistribution": (
             "Upstream OCI images are referenced, not copied or redistributed."

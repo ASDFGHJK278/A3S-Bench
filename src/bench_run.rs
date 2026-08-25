@@ -106,11 +106,16 @@ fn execute_inner(
     )?;
     journal.bind_locks(&loaded.task_lock_digest, &loaded.candidate_lock_digest)?;
     let judge_model = resolve_judge_model(&loaded.task, loaded.judge_model.as_deref(), &config)?;
+
     match status.provider.as_str() {
         "docker" => resolve_task_images(&mut loaded.task, &loaded.resolved_images)?,
-        crate::os_runtime::PROVIDER => {
-            validate_os_runtime_task(&loaded.task, &loaded.candidate, loaded.model.as_deref())?
-        }
+        crate::os_runtime::PROVIDER => validate_os_runtime_task(
+            &loaded.task,
+            &loaded.candidate,
+            loaded.model.as_deref(),
+            &loaded.task_lock_schema,
+            loaded.task_lock_resources,
+        )?,
         provider => anyhow::bail!(
             "execution through configured Runtime {provider:?} is not implemented yet"
         ),
@@ -131,6 +136,15 @@ fn execute_inner(
         .map(|_| workspace::create(&loaded.task))
         .transpose()?;
     transient.seed_workspace = seed_workspace.clone();
+    let workspace_imports = if status.provider == crate::runtime_selection::DOCKER_PROVIDER {
+        runtime::prepare_workspace_imports(&loaded.task)?
+    } else {
+        anyhow::ensure!(
+            loaded.task.work_workspace_imports.is_empty(),
+            "Task workspace imports require the Docker Runtime"
+        );
+        runtime::PreparedWorkspaceImports::default()
+    };
     journal.advance(RunStage::CandidateRunning)?;
     let runtime_execution = RuntimeExecution {
         provider: &status.provider,
@@ -145,11 +159,13 @@ fn execute_inner(
         &config,
         &candidate_workspace,
         seed_workspace.as_deref(),
+        &workspace_imports,
         game.as_ref(),
         &runtime_execution,
         &journal.run_id,
         state_root,
     )?;
+    drop(workspace_imports);
     journal.advance(RunStage::CandidateCompleted)?;
     let submission = workspace::create_submission(&loaded.task, &candidate_workspace)?;
     transient.submission = Some(submission.clone());
@@ -246,9 +262,11 @@ fn judge_identity(asset_identity: &str, model: Option<&JudgeModel>) -> String {
 
 fn start_game(task: &task::TaskInfo, state_root: &Path) -> Result<Option<game_judge::GameSession>> {
     match task.legacy_judge.as_ref() {
-        Some(source) if source.mode == "game_server" => {
-            Ok(Some(game_judge::GameSession::start(source, state_root)?))
-        }
+        Some(source) if source.mode == "game_server" => Ok(Some(game_judge::GameSession::start(
+            source,
+            task.resources.judge,
+            state_root,
+        )?)),
         _ => Ok(None),
     }
 }
@@ -263,6 +281,7 @@ fn execute_candidate(
     config: &config::LocalConfig,
     candidate_workspace: &Path,
     candidate_seed_workspace: Option<&Path>,
+    workspace_imports: &runtime::PreparedWorkspaceImports,
     game: Option<&game_judge::GameSession>,
     runtime_execution: &RuntimeExecution<'_>,
     run_id: &str,
@@ -297,12 +316,14 @@ fn execute_candidate(
                 crate::a3s_code_candidate::A3sCodeOutcome::Completed(model_usage) => CandidateRun {
                     execution: crate::result_record::CandidateExecution::completed(),
                     model_usage: Some(model_usage),
+                    candidate_event_log_digest: None,
                 },
                 crate::a3s_code_candidate::A3sCodeOutcome::TimedOut => CandidateRun {
                     execution: crate::result_record::CandidateExecution::timed_out(
                         task.candidate_timeout_sec,
                     ),
                     model_usage: None,
+                    candidate_event_log_digest: None,
                 },
             },
         );
@@ -328,6 +349,7 @@ fn execute_candidate(
             package: codex_package,
             workspace: candidate_workspace,
             seed_workspace: candidate_seed_workspace,
+            workspace_imports,
             instructions: &instructions,
             task_prompt: &prompt,
             model,
@@ -370,7 +392,12 @@ fn execute_candidate(
         );
         let execution = match runtime_execution.provider {
             "docker" => {
-                match runtime::execute_docker_candidate(task, candidate, candidate_workspace)? {
+                match runtime::execute_docker_candidate(
+                    task,
+                    candidate,
+                    candidate_workspace,
+                    workspace_imports,
+                )? {
                     runtime::CandidateProcessOutcome::Completed => {
                         crate::result_record::CandidateExecution::completed()
                     }
@@ -429,6 +456,8 @@ fn execute_candidate(
             .map(|seed| seed.source_path.as_str()),
         work_image: &task.work_image,
         work_platform: task.work_platform.as_deref(),
+        work_resources: task.resources.work,
+        workspace_imports,
         game_network: game.map(|session| {
             (
                 session.network(),
@@ -482,11 +511,20 @@ fn validate_os_runtime_task(
     task: &task::TaskInfo,
     candidate: &asset::LocalAssetPackage,
     model: Option<&str>,
+    task_lock_schema: &str,
+    task_lock_resources: Option<task::TaskResources>,
 ) -> Result<()> {
     anyhow::ensure!(
+        task.schema == "a3s-bench/task/v1",
+        "os-runtime cannot enforce explicit a3s-bench/task/v2 resources; use the Docker Runtime"
+    );
+    anyhow::ensure!(
+        task_lock_schema == "a3s.bench.task-lock.v1" && task_lock_resources.is_none(),
+        "os-runtime requires task/v1 to be bound by TaskLock v1 without explicit resources"
+    );
+    anyhow::ensure!(
         candidate.protocol != asset::CandidateProtocol::CodexExec
-            && (model.is_none()
-                || candidate.protocol == asset::CandidateProtocol::A3sCodeExec),
+            && (model.is_none() || candidate.protocol == asset::CandidateProtocol::A3sCodeExec),
         "containerized Codex and model-backed Candidates require the Docker Runtime"
     );
     anyhow::ensure!(

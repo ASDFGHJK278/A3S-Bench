@@ -28,6 +28,8 @@ pub struct ModelCandidateRequest<'a> {
     pub workspace_source_path: Option<&'a str>,
     pub work_image: &'a str,
     pub work_platform: Option<&'a str>,
+    pub work_resources: crate::task::RoleResources,
+    pub workspace_imports: &'a crate::runtime::PreparedWorkspaceImports,
     pub game_network: Option<(&'a str, &'a str)>,
     pub public_internet: bool,
     pub timeout_sec: u64,
@@ -87,6 +89,9 @@ async fn execute_async(request: ModelCandidateRequest<'_>) -> Result<ModelCandid
         image: request.work_image.to_owned(),
         platform: request.work_platform.map(str::to_owned),
         workspace: workspace.clone(),
+        resources: request.work_resources,
+        workspace_import_mounts: request.workspace_imports.mount_specs("/workspace"),
+        workspace_import_environment: request.workspace_imports.environment("/workspace"),
         game_network: request
             .game_network
             .map(|(network, url)| (network.to_owned(), url.to_owned())),
@@ -193,6 +198,9 @@ struct DockerBashSandbox {
     image: String,
     platform: Option<String>,
     workspace: PathBuf,
+    resources: crate::task::RoleResources,
+    workspace_import_mounts: Vec<String>,
+    workspace_import_environment: Vec<(String, String)>,
     game_network: Option<(String, String)>,
     public_internet: bool,
 }
@@ -214,7 +222,7 @@ impl BashSandbox for DockerBashSandbox {
             "--security-opt",
             "no-new-privileges",
         ]);
-        docker.args(crate::runtime_profile::WORK_DOCKER_LIMITS);
+        docker.args(crate::runtime_profile::work_docker_args(self.resources));
         if let Some(platform) = self.platform.as_deref() {
             docker.args(["--platform", platform]);
         }
@@ -231,12 +239,17 @@ impl BashSandbox for DockerBashSandbox {
             docker.args(["--network", "none"]);
         }
         let command = command_for_guest(command, &self.workspace, guest_workspace);
+        docker.arg("--mount").arg(format!(
+            "type=bind,src={},dst=/workspace",
+            self.workspace.display()
+        ));
+        for mount in &self.workspace_import_mounts {
+            docker.arg("--mount").arg(mount);
+        }
+        for (name, value) in &self.workspace_import_environment {
+            docker.arg("--env").arg(format!("{name}={value}"));
+        }
         let output = docker
-            .arg("--mount")
-            .arg(format!(
-                "type=bind,src={},dst=/workspace",
-                self.workspace.display()
-            ))
             .arg("--workdir")
             .arg("/workspace")
             .arg(&self.image)
@@ -330,6 +343,9 @@ mod tests {
             image: "unused:test".into(),
             platform: None,
             workspace: workspace.path().to_path_buf(),
+            resources: crate::task::LEGACY_WORK_RESOURCES,
+            workspace_import_mounts: vec![],
+            workspace_import_environment: vec![],
             game_network: None,
             public_internet: false,
         });
@@ -366,6 +382,35 @@ mod tests {
             std::future::pending::<()>(),
         ));
         assert!(matches!(timed_out, CandidateDeadline::TimedOut));
+    }
+
+    #[test]
+    fn model_candidate_is_not_gated_by_task_schema() {
+        let workspace = tempfile::tempdir().unwrap();
+        let error = execute(ModelCandidateRequest {
+            config_path: Path::new("/does/not/exist/config.acl"),
+            model: "openai/fake",
+            task_prompt: "unused",
+            candidate_instructions: "unused",
+            workspace: workspace.path(),
+            workspace_source_path: None,
+            work_image: "unused:test",
+            work_platform: None,
+            work_resources: crate::task::RoleResources {
+                cpu_limit: 8,
+                memory_bytes: 16 * 1024 * 1024 * 1024,
+            },
+            workspace_imports: &Default::default(),
+            game_network: None,
+            public_internet: false,
+            timeout_sec: 1,
+            max_tool_rounds: 1,
+            log_dir: None,
+        })
+        .unwrap_err();
+        assert!(error
+            .to_string()
+            .contains("could not load model Candidate configuration"));
     }
 
     #[test]
@@ -542,6 +587,8 @@ mod tests {
             workspace_source_path: None,
             work_image: "alpine:3.20",
             work_platform: None,
+            work_resources: crate::task::LEGACY_WORK_RESOURCES,
+            workspace_imports: &Default::default(),
             game_network: None,
             public_internet: false,
             timeout_sec: 30,
@@ -574,12 +621,17 @@ mod tests {
         .unwrap();
         let source = task.legacy_judge.as_ref().unwrap();
         let state = tempfile::tempdir().unwrap();
-        let game = crate::game_judge::GameSession::start(source, state.path()).unwrap();
+        let game =
+            crate::game_judge::GameSession::start(source, task.resources.judge, state.path())
+                .unwrap();
         let workspace = tempfile::tempdir().unwrap();
         let sandbox = DockerBashSandbox {
             image: "python:3.12-alpine".into(),
             platform: None,
             workspace: workspace.path().to_path_buf(),
+            resources: task.resources.work,
+            workspace_import_mounts: vec![],
+            workspace_import_environment: vec![],
             game_network: Some((game.network().into(), game.url())),
             public_internet: false,
         };

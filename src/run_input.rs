@@ -21,6 +21,8 @@ pub struct LoadedRun {
     pub reasoning_effort: Option<String>,
     pub codex_package: Option<crate::codex_package::CachedCodexPackage>,
     pub resolved_images: BTreeMap<String, String>,
+    pub task_lock_schema: String,
+    pub task_lock_resources: Option<task::TaskResources>,
     pub task_lock_digest: String,
     pub candidate_lock_digest: String,
 }
@@ -144,6 +146,8 @@ fn load_locks(task_lock: &Path, candidate_lock: &Path, state_root: &Path) -> Res
         reasoning_effort: candidate_lock.reasoning_effort,
         codex_package,
         resolved_images: locked_task.lock.resolved_images,
+        task_lock_schema: locked_task.lock.schema,
+        task_lock_resources: locked_task.lock.resources,
         task_lock_digest: locked_task.lock.lock_digest,
         candidate_lock_digest: candidate_lock.lock_digest,
     })

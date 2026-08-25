@@ -58,6 +58,7 @@ pub struct CodexExecutionRequest<'a> {
     pub package: &'a CachedCodexPackage,
     pub workspace: &'a Path,
     pub seed_workspace: Option<&'a Path>,
+    pub workspace_imports: &'a crate::runtime::PreparedWorkspaceImports,
     pub instructions: &'a str,
     pub task_prompt: &'a str,
     pub model: Option<&'a str>,
@@ -618,7 +619,9 @@ fn enumerate_container_workspace_files(
     resources
         .metadata()
         .add_labels(&mut create, &resources.export_container);
-    create.args(crate::runtime_profile::WORK_DOCKER_LIMITS);
+    create.args(crate::runtime_profile::work_docker_args(
+        request.task.resources.work,
+    ));
     create.args(["--network", "none"]);
     if let Some(platform) = request.task.work_platform.as_deref() {
         create.args(["--platform", platform]);
@@ -886,7 +889,12 @@ fn build_codex_run_command(
         container_workspace,
         request.seed_workspace.is_some(),
     )?;
-    add_codex_environment(&mut command, request.package)?;
+    add_codex_environment(
+        &mut command,
+        request.package,
+        request.workspace_imports,
+        container_workspace,
+    )?;
     add_proxy_environment(&mut command, resources, request.game_network)?;
     add_game_environment(&mut command, request.game_network)?;
     request.package.verify_for_mount()?;
@@ -906,7 +914,11 @@ fn build_codex_run_command(
         .arg(format!(
             "type=volume,src={},dst={CONTAINER_HARNESS},volume-subpath=codex-harness,readonly",
             resources.package_volume
-        ))
+        ));
+    request
+        .workspace_imports
+        .add_mounts(&mut command, container_workspace);
+    command
         .arg("--workdir")
         .arg(container_workspace)
         .arg("--entrypoint")
@@ -1224,7 +1236,12 @@ fn ensure_proxy_helper_image() -> Result<()> {
     Ok(())
 }
 
-fn add_codex_environment(command: &mut Command, package: &CachedCodexPackage) -> Result<()> {
+fn add_codex_environment(
+    command: &mut Command,
+    package: &CachedCodexPackage,
+    workspace_imports: &crate::runtime::PreparedWorkspaceImports,
+    container_workspace: &str,
+) -> Result<()> {
     let paths = package.container_paths()?;
     command
         .arg("--env")
@@ -1235,14 +1252,8 @@ fn add_codex_environment(command: &mut Command, package: &CachedCodexPackage) ->
         "CODEX_CODE_MODE_HOST_PATH={}",
         container_path(&paths.code_mode_host)
     ));
-    command.args([
-        "--env",
-        "LANG=C.UTF-8",
-        "--env",
-        "NO_COLOR=1",
-        "--env",
-        "MAVEN_OPTS=-Dmaven.repo.local=/run/a3s-codex/home/.m2/repository",
-    ]);
+    command.args(["--env", "LANG=C.UTF-8", "--env", "NO_COLOR=1"]);
+    workspace_imports.add_environment(command, container_workspace);
     Ok(())
 }
 
@@ -1358,7 +1369,9 @@ fn add_container_args(
     resources
         .metadata()
         .add_labels(command, &resources.main_container);
-    command.args(crate::runtime_profile::WORK_DOCKER_LIMITS);
+    command.args(crate::runtime_profile::work_docker_args(
+        task.resources.work,
+    ));
     command.args(["--network", network]);
     command.args(["--tmpfs", "/run/a3s-codex:rw,noexec,nosuid,nodev,size=64m"]);
     if let Some(platform) = task.work_platform.as_deref() {
@@ -2597,6 +2610,7 @@ mod tests {
         let workspace = home.path().join("workspace");
         std::fs::create_dir(&workspace).unwrap();
         let mut task = TaskInfo {
+            schema: "a3s-bench/task/v1".into(),
             id: "test".into(),
             name: "test".into(),
             category: "test".into(),
@@ -2618,6 +2632,8 @@ mod tests {
                 max_total_bytes: 1,
                 max_file_bytes: 1,
             },
+            resources: Default::default(),
+            work_workspace_imports: vec![],
             legacy_judge: None,
             root: Path::new("/tmp/task").to_path_buf(),
         };
@@ -2626,6 +2642,7 @@ mod tests {
             package: &package,
             workspace: &workspace,
             seed_workspace: None,
+            workspace_imports: &Default::default(),
             instructions: "instructions",
             task_prompt: "task",
             model: Some("gpt-5.3-codex-spark"),
@@ -2704,9 +2721,7 @@ mod tests {
         assert!(args
             .windows(2)
             .any(|pair| pair == ["--env", "CODEX_HOME=/run/a3s-codex/home/.codex"]));
-        assert!(args
-            .iter()
-            .any(|arg| arg == "MAVEN_OPTS=-Dmaven.repo.local=/run/a3s-codex/home/.m2/repository"));
+        assert!(!args.iter().any(|arg| arg.starts_with("MAVEN_OPTS=")));
         let workspace_mount = format!("type=volume,src={},dst=/app", resources.workspace_volume);
         assert!(args
             .windows(2)
@@ -2973,6 +2988,7 @@ mod tests {
     fn preserves_container_hardening_and_bounded_capture() {
         let mut command = Command::new("docker");
         let task = TaskInfo {
+            schema: "a3s-bench/task/v1".into(),
             id: "test".into(),
             name: "test".into(),
             category: "test".into(),
@@ -2990,6 +3006,8 @@ mod tests {
                 max_total_bytes: 1,
                 max_file_bytes: 1,
             },
+            resources: Default::default(),
+            work_workspace_imports: vec![],
             legacy_judge: None,
             root: Path::new("/tmp/task").to_path_buf(),
         };
@@ -3007,7 +3025,9 @@ mod tests {
             .windows(2)
             .any(|pair| pair == ["--security-opt", "no-new-privileges"]));
         assert!(args.windows(2).any(|pair| pair == ["--pids-limit", "512"]));
-        assert!(args.windows(2).any(|pair| pair == ["--memory", "8g"]));
+        assert!(args
+            .windows(2)
+            .any(|pair| pair == ["--memory", "8589934592"]));
         assert!(args.windows(2).any(|pair| pair == ["--cpus", "4"]));
         assert!(args
             .windows(2)
@@ -3268,7 +3288,9 @@ print("ok")
         .unwrap();
         let source = task.legacy_judge.as_ref().unwrap();
         let state = tempfile::tempdir().unwrap();
-        let game = crate::game_judge::GameSession::start(source, state.path()).unwrap();
+        let game =
+            crate::game_judge::GameSession::start(source, task.resources.judge, state.path())
+                .unwrap();
         let resources = CodexResources::new(container_name(), true);
         let game_url = game.url();
         let outcome = (|| -> Result<()> {
@@ -3379,7 +3401,9 @@ print(json.dumps(post("/step", {"action": "look"})))
             resources
                 .metadata()
                 .add_labels(&mut create, &resources.main_container);
-            create.args(crate::runtime_profile::WORK_DOCKER_LIMITS);
+            create.args(crate::runtime_profile::work_docker_args(
+                task.resources.work,
+            ));
             create.args(["--network", resources.internal_network.as_deref().unwrap()]);
             add_proxy_environment(&mut create, &resources, Some((game.network(), &game_url)))?;
             add_game_environment(&mut create, Some((game.network(), &game_url)))?;

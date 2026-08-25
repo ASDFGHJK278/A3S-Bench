@@ -5,6 +5,7 @@ use std::net::TcpListener;
 fn native_codex_materializes_only_non_native_workspace_sources() {
     let root = tempfile::tempdir().unwrap();
     let mut task = task::TaskInfo {
+        schema: "a3s-bench/task/v1".into(),
         id: "test".into(),
         name: "test".into(),
         category: "test".into(),
@@ -26,6 +27,8 @@ fn native_codex_materializes_only_non_native_workspace_sources() {
             max_total_bytes: 1,
             max_file_bytes: 1,
         },
+        resources: Default::default(),
+        work_workspace_imports: vec![],
         legacy_judge: None,
         root: root.path().to_path_buf(),
     };
@@ -45,6 +48,47 @@ fn native_codex_materializes_only_non_native_workspace_sources() {
         platform: None,
     });
     assert!(requires_host_workspace(&task));
+}
+
+#[test]
+fn os_runtime_dispatch_rejects_explicit_task_v2_resources() {
+    let mut task =
+        task::load_local(&Path::new(env!("CARGO_MANIFEST_DIR")).join("examples/smoke")).unwrap();
+    task.schema = "a3s-bench/task/v2".into();
+    let candidate =
+        asset::load_local(&Path::new(env!("CARGO_MANIFEST_DIR")).join("examples/smoke-candidate"))
+            .unwrap();
+    let error = validate_os_runtime_task(
+        &task,
+        &candidate,
+        None,
+        "a3s.bench.task-lock.v2",
+        Some(task.resources),
+    )
+    .err()
+    .unwrap();
+    assert!(error
+        .to_string()
+        .contains("cannot enforce explicit a3s-bench/task/v2 resources"));
+}
+
+#[test]
+fn os_runtime_dispatch_rejects_forged_task_lock_contracts() {
+    let task =
+        task::load_local(&Path::new(env!("CARGO_MANIFEST_DIR")).join("examples/smoke")).unwrap();
+    let candidate =
+        asset::load_local(&Path::new(env!("CARGO_MANIFEST_DIR")).join("examples/smoke-candidate"))
+            .unwrap();
+    for (schema, resources) in [
+        ("a3s.bench.task-lock.v2", Some(task.resources)),
+        ("a3s.bench.task-lock.v1", Some(task.resources)),
+    ] {
+        let error =
+            validate_os_runtime_task(&task, &candidate, None, schema, resources).unwrap_err();
+        assert!(error
+            .to_string()
+            .contains("TaskLock v1 without explicit resources"));
+    }
 }
 
 #[test]
@@ -135,6 +179,7 @@ fn model_candidate_game_and_task_owned_judge_run_end_to_end() {
         &config,
         &candidate_workspace,
         None,
+        &runtime::PreparedWorkspaceImports::default(),
         Some(&game),
         &runtime_execution,
         "test-run",

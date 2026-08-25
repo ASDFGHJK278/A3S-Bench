@@ -212,11 +212,6 @@ impl BashSandbox for DockerBashSandbox {
         docker.args([
             "run",
             "--rm",
-            "--read-only",
-            "--cap-drop",
-            "ALL",
-            "--security-opt",
-            "no-new-privileges",
         ]);
         docker.args(crate::runtime_profile::work_docker_args(self.resources));
         if let Some(platform) = self.platform.as_deref() {

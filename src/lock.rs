@@ -18,6 +18,8 @@ pub struct TaskLock {
     pub resources: Option<crate::task::TaskResources>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub workspace_imports: Option<Vec<crate::task::WorkWorkspaceImport>>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub network_allow_hosts: Option<Vec<String>>,
 }
 
 pub struct LoadedTaskLock {
@@ -100,15 +102,18 @@ pub fn create_task_with_provider(
             resolved_images.insert(image_key(reference, platform), resolved.immutable_ref);
         }
     }
-    let (lock_schema, resources, workspace_imports) = match task.schema.as_str() {
-        "a3s-bench/task/v1" => ("a3s.bench.task-lock.v1", None, None),
-        "a3s-bench/task/v2" => (
-            "a3s.bench.task-lock.v2",
-            Some(task.resources),
-            Some(task.work_workspace_imports.clone()),
-        ),
-        _ => unreachable!("Task schema was validated"),
-    };
+    let (lock_schema, resources, workspace_imports, network_allow_hosts) =
+        match task.schema.as_str() {
+            "a3s-bench/task/v1" => ("a3s.bench.task-lock.v1", None, None, None),
+            "a3s-bench/task/v2" => (
+                "a3s.bench.task-lock.v2",
+                Some(task.resources),
+                Some(task.work_workspace_imports.clone()),
+                (!task.work_network_allow_hosts.is_empty())
+                    .then(|| task.work_network_allow_hosts.clone()),
+            ),
+            _ => unreachable!("Task schema was validated"),
+        };
     let mut value = TaskLock {
         schema: lock_schema.into(),
         lock_digest: String::new(),
@@ -120,6 +125,7 @@ pub fn create_task_with_provider(
         resolved_images,
         resources,
         workspace_imports,
+        network_allow_hosts,
     };
     value.lock_digest = crate::lock_identity::task(&value)?;
     write_exclusive(output, &serde_json::to_vec_pretty(&value)?)?;
@@ -288,8 +294,10 @@ pub fn load_task(path: &Path, state_root: &Path) -> Result<LoadedTaskLock> {
     let task = crate::task::load_local(&artifact).context("locked Task artifact is invalid")?;
     match (value.schema.as_str(), task.schema.as_str()) {
         ("a3s.bench.task-lock.v1", "a3s-bench/task/v1") => anyhow::ensure!(
-            value.resources.is_none() && value.workspace_imports.is_none(),
-            "TaskLock v1 must not contain resources or workspace imports"
+            value.resources.is_none()
+                && value.workspace_imports.is_none()
+                && value.network_allow_hosts.is_none(),
+            "TaskLock v1 must not contain resources, workspace imports, or network allow hosts"
         ),
         ("a3s.bench.task-lock.v2", "a3s-bench/task/v2") => {
             anyhow::ensure!(
@@ -299,6 +307,18 @@ pub fn load_task(path: &Path, state_root: &Path) -> Result<LoadedTaskLock> {
             anyhow::ensure!(
                 value.workspace_imports.as_ref() == Some(&task.work_workspace_imports),
                 "TaskLock workspace imports do not match the locked Task artifact"
+            );
+            anyhow::ensure!(
+                value
+                    .network_allow_hosts
+                    .as_deref()
+                    .is_none_or(|hosts| !hosts.is_empty()),
+                "TaskLock network allow hosts must omit an empty list"
+            );
+            anyhow::ensure!(
+                value.network_allow_hosts.as_deref().unwrap_or_default()
+                    == task.work_network_allow_hosts,
+                "TaskLock network allow hosts do not match the locked Task artifact"
             );
         }
         ("a3s.bench.task-lock.v1", "a3s-bench/task/v2") => {

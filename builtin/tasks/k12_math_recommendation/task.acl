@@ -18,11 +18,15 @@ bench "k12_math_recommendation" {
   work {
     cpu_limit    = 4
     memory_bytes = 17179869184
+    https_allow_hosts = [
+      "files.pythonhosted.org",
+      "pypi.org",
+    ]
 
     image {
       ref = "docker.io/seededge/edgebench.work.k12_math_recommendation:fecdcfb17904"
     }
-    network_need = "none"
+    network_need = "restricted_https"
   }
 
   submission {

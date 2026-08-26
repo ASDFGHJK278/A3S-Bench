@@ -13,6 +13,7 @@ fn native_codex_materializes_only_non_native_workspace_sources() {
         work_image: "example/work@sha256:same".into(),
         work_platform: None,
         work_network_need: "none".into(),
+        work_network_allow_hosts: vec![],
         candidate_timeout_sec: 1,
         metrics: vec![],
         workspace_seed: Some(task::WorkspaceSeed {

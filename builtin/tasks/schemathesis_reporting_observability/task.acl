@@ -18,11 +18,15 @@ bench "schemathesis_reporting_observability" {
   work {
     cpu_limit    = 4
     memory_bytes = 17179869184
+    https_allow_hosts = [
+      "files.pythonhosted.org",
+      "pypi.org",
+    ]
 
     image {
       ref = "docker.io/seededge/edgebench.work.schemathesis_reporting_observability:cd6879e59e62"
     }
-    network_need = "none"
+    network_need = "restricted_https"
   }
 
   submission {

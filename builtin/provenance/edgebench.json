@@ -7,6 +7,8 @@
     "Renamed the normalized primary metric to the native name score.",
     "Resolved work and Judge resource limits from the pinned official Codex experiment.",
     "Imported the Exchange Core Maven repository from the protected Work image into an isolated per-run Candidate volume at the observed agent-user Maven repository path without copying sibling Maven configuration.",
+    "Added task-scoped exact-host HTTPS allowlists for seven source compatibility gaps while retaining internal-network Candidate isolation; the New Foundations github.com grant intentionally deviates from source internet=false and remains mutable external input.",
+    "Added fail-closed CTA and K12 Judge adapters that install only source-declared required dependencies from an explicit PyPI index into isolated temporary targets; installation failure exits through the Judge-invalid code path and submission-controlled requirements are never evaluated.",
     "Reapplied A3S fail-closed Judge command adaptations for the stale Order Addition helper hash and the git_rewrite_in_zig and rust_multicrate_reconstruction runtime incompatibilities."
   ],
   "dataset": {
@@ -268,12 +270,20 @@
       "generated_sha256": {
         "private/judge/.a3s/asset.acl": "sha256:21280731244a23d0c43a572d34920e90e34ddbf61b0efbac861439062cd1f803",
         "private/judge/agent.md": "sha256:b31e94fc3288c9c7c0ff282db565ac07cbb4b64d5be42970ecc712def545c15a",
-        "private/judge/judge.source.json": "sha256:0847f17322906aaea4bd156a5f78185556c99a3bd41622f9c44661656eda8258",
+        "private/judge/judge.source.json": "sha256:e5422ca3fdc529972ad3a2619de53b0f4ca45d7ae7ccdc34e078a561bdabdca1",
         "public/prompt.md": "sha256:60f75c73ae7fbf6d05f6bfe2833801bf976b85cc80ad4aa231315bb3468b7365",
-        "task.acl": "sha256:7618f01f53f0c70631a347a0c17bdac27e823850ccf46fe1051ca1f85a6e82d2"
+        "task.acl": "sha256:58b9bad1bbe3fa763b2a5ff48a3d697b83d4e0d4f821dd2d920f9b3d28d0365d"
       },
       "license": "CC-BY-4.0",
       "modified": true,
+      "network_adaptation": {
+        "https_allow_hosts": [
+          "files.pythonhosted.org",
+          "pypi.org"
+        ],
+        "network_need": "restricted_https",
+        "reason": "Allows only PyPI HTTPS hosts so the Candidate can install the source-declared exact required scientific Python dependencies missing from the pinned Work image."
+      },
       "resolved_resources": {
         "judge": {
           "cpu_limit": 4,
@@ -366,10 +376,17 @@
         "private/judge/agent.md": "sha256:b3f33f0aa5dcbc60e4b4dd5d60ffabd45f11f31d3b6e36d6c2415c5144c6590c",
         "private/judge/judge.source.json": "sha256:da83ba823283479f1297e2e4419111d579bd1c648ab6ce7ebc11ab42049fd24d",
         "public/prompt.md": "sha256:d0439781d7e312a469833b36f18d08a40e439b38161fda9ad72c8f2bae61bc52",
-        "task.acl": "sha256:69f5150516c10e11c650698734cfda67012e6204f2180499f27454716c624eb6"
+        "task.acl": "sha256:dbcdd308a79d67b2f85aa505677f6b3109e8fb26ef780158992ed8d377d86171"
       },
       "license": "CC-BY-4.0",
       "modified": true,
+      "network_adaptation": {
+        "https_allow_hosts": [
+          "repo.maven.apache.org"
+        ],
+        "network_need": "restricted_https",
+        "reason": "Allows only Maven Central HTTPS in addition to the isolated Maven repository imported from the pinned Work image."
+      },
       "resolved_resources": {
         "judge": {
           "cpu_limit": 4,
@@ -587,12 +604,20 @@
       "generated_sha256": {
         "private/judge/.a3s/asset.acl": "sha256:0f40926cc45511ace52a75b31aeacd7f7dba1d3c36d0db7a47c43d502e8de250",
         "private/judge/agent.md": "sha256:65ea185e9c7cfd0572f0bea465b9c1159d4e39aa1448dfb0ad246812696fef53",
-        "private/judge/judge.source.json": "sha256:78883767e83b363518893b0dae066938b6d9534f97a68645a6538b773eec4d80",
+        "private/judge/judge.source.json": "sha256:bd888a6cfbe4ae2bb9e9abedf7cfa1989288d12269dd24648f31878a814ff8c2",
         "public/prompt.md": "sha256:c9593d37712bf1067c1869e2dd0543cf0d660ac13f78b3464ef7577d2e41a8ba",
-        "task.acl": "sha256:ffa66eadeaee0df167107669783e2dc8545852e5eaf61abafcb45d6213c9929a"
+        "task.acl": "sha256:c51d66af7f882159d34589e53cedae9c65ee12ef6218e6023d8a857ebca7dc44"
       },
       "license": "CC-BY-4.0",
       "modified": true,
+      "network_adaptation": {
+        "https_allow_hosts": [
+          "files.pythonhosted.org",
+          "pypi.org"
+        ],
+        "network_need": "restricted_https",
+        "reason": "Allows only PyPI HTTPS hosts so the Candidate can install source-declared required networkx, which is missing from the pinned Work image."
+      },
       "resolved_resources": {
         "judge": {
           "cpu_limit": 4,
@@ -685,10 +710,17 @@
         "private/judge/agent.md": "sha256:8aa6425dd9d1c67860715b50a33ffc1a85829bdc68a04207c250ffe3ae2d9d32",
         "private/judge/judge.source.json": "sha256:b5ebcb6fba0341bc23016b12bf9811879a18f9dd142911e53e47c2576e9e0b7b",
         "public/prompt.md": "sha256:b33bbd6fe28b095d80bef83fae535e80891e7d84213afdc91d246b0c99c5bb0f",
-        "task.acl": "sha256:d9f3920df38e6c3d2c89f9196f97fde9ed7987734a88a07cf3080e9fb0bcb32a"
+        "task.acl": "sha256:3a9f804beefecf4e1fe83698963ae92d004cbe3da43665fdc53db31843c1958b"
       },
       "license": "CC-BY-4.0",
       "modified": true,
+      "network_adaptation": {
+        "https_allow_hosts": [
+          "github.com"
+        ],
+        "network_need": "restricted_https",
+        "reason": "Allows only github.com HTTPS for the task-required doc-gen4 clone; this is an intentional A3S deviation from the source internet=false setting and exposes GitHub-controlled mutable content."
+      },
       "resolved_resources": {
         "judge": {
           "cpu_limit": 8,
@@ -877,10 +909,18 @@
         "private/judge/agent.md": "sha256:5a7ccccee411fbe782b5a4092569c4254bd3bacc64d8fbcd840d3c5c2f78bdf0",
         "private/judge/judge.source.json": "sha256:f8a2ff893181eb0b06c7ab7ca427af318c6896d6aab54052cec613b5e570a093",
         "public/prompt.md": "sha256:9f5851c10bdb557138f32129227a4bd089050728b48de519efe4b99ed4707149",
-        "task.acl": "sha256:be7585371534f201869f1514508f6c3734b09394f235df6981c3dafd77420d9c"
+        "task.acl": "sha256:6d8d6ecc16633af8fa7eee03eb55ab0f6ea1e6d497053561c1e12b1001651714"
       },
       "license": "CC-BY-4.0",
       "modified": true,
+      "network_adaptation": {
+        "https_allow_hosts": [
+          "files.pythonhosted.org",
+          "pypi.org"
+        ],
+        "network_need": "restricted_https",
+        "reason": "Allows only PyPI HTTPS hosts for source-declared Python dependencies missing from the pinned Work image."
+      },
       "resolved_resources": {
         "judge": {
           "cpu_limit": 4,
@@ -901,10 +941,18 @@
         "private/judge/agent.md": "sha256:ad6cce72591646383d2993031bc31a0dc58684ea7d6898a6b14e74219163a471",
         "private/judge/judge.source.json": "sha256:60a921e93cf33f31b0757c99a4941d6c6e39bb4aab275bd7240907ab63ef45b5",
         "public/prompt.md": "sha256:523d4c96591d2b249c6b48d1b5804b7d73b89421a582a45d7a740674e5f30a1f",
-        "task.acl": "sha256:795eca2a35b08f32649d395cf6a5b78ce651362f7be2f5048d7120fbea953a1b"
+        "task.acl": "sha256:f28500e2c0eaa4c6ed36cb4a5830b57686e11fa9f1c6ddfa9a1b1ea41c7c806f"
       },
       "license": "CC-BY-4.0",
       "modified": true,
+      "network_adaptation": {
+        "https_allow_hosts": [
+          "files.pythonhosted.org",
+          "pypi.org"
+        ],
+        "network_need": "restricted_https",
+        "reason": "Allows only PyPI HTTPS hosts for source-declared Python dependencies missing from the pinned Work image."
+      },
       "resolved_resources": {
         "judge": {
           "cpu_limit": 4,
@@ -925,10 +973,18 @@
         "private/judge/agent.md": "sha256:2126425d99cd482165741a7319a2f06ccba9db29cf4f389d40bd4164c7560dca",
         "private/judge/judge.source.json": "sha256:89e4eebe967b67fb7118d95877d3415a8ef8268268e4e2985998e67214a5e3c7",
         "public/prompt.md": "sha256:9f5851c10bdb557138f32129227a4bd089050728b48de519efe4b99ed4707149",
-        "task.acl": "sha256:3be1b8c86c848040c67bfefc78beb5d4e6661cffe5b30fb357300b8b38efcf2c"
+        "task.acl": "sha256:813b46cc3ee3e70b4e19ffa6d8ecd1a3f76392df0006e5d812485a655649456a"
       },
       "license": "CC-BY-4.0",
       "modified": true,
+      "network_adaptation": {
+        "https_allow_hosts": [
+          "files.pythonhosted.org",
+          "pypi.org"
+        ],
+        "network_need": "restricted_https",
+        "reason": "Allows only PyPI HTTPS hosts for source-declared Python dependencies missing from the pinned Work image; container-local loopback remains direct."
+      },
       "resolved_resources": {
         "judge": {
           "cpu_limit": 4,

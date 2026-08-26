@@ -248,7 +248,7 @@ impl BashSandbox for DockerBashSandbox {
             .arg("--workdir")
             .arg("/workspace")
             .arg(&self.image)
-            .args(["/bin/sh", "-lc", &command])
+            .args(sandbox_shell_argv(&command))
             .output()
             .await
             .context("could not start Docker bash sandbox")?;
@@ -264,6 +264,10 @@ impl BashSandbox for DockerBashSandbox {
 
 fn command_for_guest(command: &str, host_workspace: &Path, guest_workspace: &str) -> String {
     command.replace(host_workspace.to_string_lossy().as_ref(), guest_workspace)
+}
+
+fn sandbox_shell_argv(command: &str) -> [&str; 3] {
+    ["/bin/sh", "-c", command]
 }
 
 #[cfg(test)]
@@ -318,6 +322,14 @@ mod tests {
         assert_eq!(
             command_for_guest("printf 'workspace'", host, "/workspace"),
             "printf 'workspace'"
+        );
+    }
+
+    #[test]
+    fn sandbox_commands_use_a_non_login_shell() {
+        assert_eq!(
+            sandbox_shell_argv("printf ok"),
+            ["/bin/sh", "-c", "printf ok"]
         );
     }
 

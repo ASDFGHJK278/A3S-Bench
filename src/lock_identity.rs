@@ -25,6 +25,8 @@ struct TaskLockIdentity<'a> {
     resolved_images: &'a std::collections::BTreeMap<String, String>,
     resources: &'a Option<crate::task::TaskResources>,
     workspace_imports: &'a Option<Vec<crate::task::WorkWorkspaceImport>>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    network_allow_hosts: &'a Option<Vec<String>>,
 }
 
 #[derive(Serialize)]
@@ -60,6 +62,7 @@ pub fn task(value: &TaskLock) -> Result<String> {
             resolved_images: &value.resolved_images,
             resources: &value.resources,
             workspace_imports: &value.workspace_imports,
+            network_allow_hosts: &value.network_allow_hosts,
         })
     } else {
         digest(&LegacyTaskLockIdentity {
@@ -163,6 +166,7 @@ mod tests {
             resolved_images: BTreeMap::new(),
             resources: None,
             workspace_imports: None,
+            network_allow_hosts: None,
         };
         let first = task(&task_lock).unwrap();
         validate_digest(&first).unwrap();
@@ -184,6 +188,7 @@ mod tests {
             resolved_images: BTreeMap::new(),
             resources: None,
             workspace_imports: None,
+            network_allow_hosts: None,
         };
         assert_eq!(
             task(&value).unwrap(),
@@ -204,6 +209,7 @@ mod tests {
             resolved_images: BTreeMap::new(),
             resources: Some(crate::task::TaskResources::default()),
             workspace_imports: Some(Vec::new()),
+            network_allow_hosts: None,
         };
         let first = task(&value).unwrap();
         value.resources.as_mut().unwrap().work.memory_bytes += 1;
@@ -219,6 +225,30 @@ mod tests {
                 target_path: ".cache".into(),
             });
         assert_ne!(resource_digest, task(&value).unwrap());
+        let import_digest = task(&value).unwrap();
+        value.network_allow_hosts = Some(vec!["pypi.org".into()]);
+        assert_ne!(import_digest, task(&value).unwrap());
+    }
+
+    #[test]
+    fn historical_task_v2_empty_network_identity_vector_is_unchanged() {
+        let value = TaskLock {
+            schema: "a3s.bench.task-lock.v2".into(),
+            lock_digest: String::new(),
+            task_revision: format!("sha256:{}", "c".repeat(64)),
+            artifact_digest: format!("sha256:{}", "c".repeat(64)),
+            judge_revision: format!("sha256:{}", "d".repeat(64)),
+            judge_artifact_digest: format!("sha256:{}", "e".repeat(64)),
+            judge_model: None,
+            resolved_images: BTreeMap::new(),
+            resources: Some(crate::task::TaskResources::default()),
+            workspace_imports: Some(Vec::new()),
+            network_allow_hosts: None,
+        };
+        assert_eq!(
+            task(&value).unwrap(),
+            "sha256:337c13a292069440ed9c808ef66208947dc09cdee01bd337992801487121e990"
+        );
     }
 
     #[test]

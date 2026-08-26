@@ -18,11 +18,15 @@ bench "cta_risk_budget_optimization" {
   work {
     cpu_limit    = 4
     memory_bytes = 17179869184
+    https_allow_hosts = [
+      "files.pythonhosted.org",
+      "pypi.org",
+    ]
 
     image {
       ref = "docker.io/seededge/edgebench.work.cta_risk_budget_optimization:d799d7f632c3"
     }
-    network_need = "none"
+    network_need = "restricted_https"
   }
 
   submission {

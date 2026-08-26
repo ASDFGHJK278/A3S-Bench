@@ -27,6 +27,9 @@ fn write_test_task_lock(
         resources,
         workspace_imports: (schema == "a3s.bench.task-lock.v2")
             .then(|| task.work_workspace_imports.clone()),
+        network_allow_hosts: (schema == "a3s.bench.task-lock.v2"
+            && !task.work_network_allow_hosts.is_empty())
+        .then(|| task.work_network_allow_hosts.clone()),
     };
     value.lock_digest = crate::lock_identity::task(&value).unwrap();
     std::fs::write(output, serde_json::to_vec_pretty(&value).unwrap()).unwrap();
@@ -110,6 +113,7 @@ fn task_lock_creation_preserves_the_v1_contract() {
     assert_eq!(value.schema, "a3s.bench.task-lock.v1");
     assert_eq!(value.resources, None);
     assert_eq!(value.workspace_imports, None);
+    assert_eq!(value.network_allow_hosts, None);
     load_task(&output, state.path()).unwrap();
 }
 
@@ -158,6 +162,28 @@ fn task_lock_v2_rejects_workspace_imports_that_disagree_with_artifact() {
 }
 
 #[test]
+fn task_lock_v2_rejects_network_allow_hosts_that_disagree_with_artifact() {
+    let state = tempfile::tempdir().unwrap();
+    let output = state.path().join("task.lock.json");
+    let source = Path::new("builtin/tasks/cta_risk_budget_optimization");
+    let task = crate::task::load_local(source).unwrap();
+    let mut value = write_test_task_lock(
+        source,
+        "a3s.bench.task-lock.v2",
+        Some(task.resources),
+        state.path(),
+        &output,
+    );
+    value.network_allow_hosts = Some(vec!["example.com".into()]);
+    value.lock_digest = crate::lock_identity::task(&value).unwrap();
+    std::fs::write(&output, serde_json::to_vec_pretty(&value).unwrap()).unwrap();
+    let error = load_task(&output, state.path()).err().unwrap();
+    assert!(error
+        .to_string()
+        .contains("network allow hosts do not match the locked Task artifact"));
+}
+
+#[test]
 fn task_lock_loader_rejects_both_schema_artifact_cross_pairs() {
     let state = tempfile::tempdir().unwrap();
     let output = state.path().join("task.lock.json");
@@ -202,6 +228,7 @@ fn os_runtime_task_lock_binds_managed_runner_images_without_docker() {
     assert_eq!(value.schema, "a3s.bench.task-lock.v1");
     assert_eq!(value.resources, None);
     assert_eq!(value.workspace_imports, None);
+    assert_eq!(value.network_allow_hosts, None);
     assert_eq!(value.resolved_images.len(), 2);
     assert!(value
         .resolved_images

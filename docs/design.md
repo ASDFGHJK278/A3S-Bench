@@ -296,15 +296,10 @@ Every conforming execution MUST satisfy all of the following:
 9. Candidate and Judge code are containment-untrusted. A Judge result is
    measurement-authoritative only under the Task's locked trust decision and,
    for an official built-in, a valid admission record.
-10. Generic P1 Agent and ModelGateway paths receive no A3S OS token, registry
-    credential, artifact credential, raw model-provider credential, or operator
-    secret. The bundled `codex` Candidate is the explicit product exception: it
-    receives only a copied per-run `auth.json`; original auth, API keys,
-    benchmark state, Judge assets, and the Docker socket remain unavailable.
-11. General network is denied for all P1 Candidate and Judge profiles except
-    the bundled `codex` Candidate. Model access, when allowed, is a distinct
-    trial-scoped ModelGateway capability. Codex uses the Candidate Docker
-    `bridge` network because Docker is its sole sandbox boundary.
+10. No A3S OS token, registry credential, artifact credential, raw model-provider
+   credential, or operator secret enters either Agent sandbox.
+11. General network is denied for the P1 Candidate and Judge profiles. Model
+    access, when allowed, is a distinct trial-scoped ModelGateway capability.
 12. A deterministic Judge receives no ModelGateway capability. A model Judge
     receives only the model, route, budget, and operation scope locked by the
     plan.
@@ -489,56 +484,12 @@ configuration are identical. The adapter currently uses the `a3s.asset.v1`,
 not a restriction on the Candidate implementation.
 
 The installed component provides `codex` through the same embedded selector
-contract. Its locked adapter declares the `codex-exec` product protocol. The
-selector remains a convenience name: Bench resolves it to a normal immutable
-Candidate adapter and uses the same Task, locking, result, and comparison
-pipeline. Future products such as Claude Code can add distinct protocols
-without adding product branches to task or result logic.
-
-The bundled `codex` Candidate is the native Codex CLI product and the explicit
-product exception to the generic P1 Agent credential and network rules. It
-runs directly inside the existing per-Task Docker work container defined by
-the Task's work image. There is no host-native execution and no nested
-Bubblewrap or Codex sandbox: Codex's internal sandbox is disabled, and Docker
-is the sole sandbox boundary. Model tools can therefore read and modify
-everything visible inside that container, including the copied `auth.json`.
-For `network_need = "none"`, the Candidate has no default public route and
-reaches only the Codex control-plane allowlist through a dual-homed CONNECT
-sidecar on a per-run internal network. A Task that explicitly requests
-`public_internet` retains ordinary bridge networking.
-
-Bench prepares the official standalone Codex package on the host once per
-artifact digest, stores it in a content-addressed cache, and mounts the
-verified package read-only into each run's work container. Codex is not
-downloaded or installed in the container. Before each run, Bench copies only
-the operator-selected `auth.json` source into a private per-run container home,
-mounts that copy for the run, and cleans the home after the container is
-removed. The original host auth, API keys, benchmark state, Judge assets, and
-Docker socket remain unavailable; Bench does not inject `OPENAI_API_KEY` or
-`CODEX_API_KEY`.
-
-The current Codex Candidate uses CandidateLock v3. Its `product` identity
-records the Codex package name, version, target triple, and artifact-set
-digest; the lock digest also binds the Candidate revision, artifact, model,
-and reasoning effort. The selected model and reasoning effort, including their
-absence, are lock-bound, and a locked run rejects overrides. For Codex,
-CandidateLock v1 and v2 are historical generations; v2 is the legacy
-native-Codex form and must be regenerated with the current Codex Candidate
-lock command. Ordinary Agent Candidates continue to use CandidateLock v1.
-
-The container receives the package-embedded EdgeBench Codex Stop Hook from a
-read-only `/etc/codex` mount. Every stop request returns `block` with
-`Do not stop. Continue working on the implementation.` The container entrypoint
-runs the initial `codex exec`, then uses `codex exec resume --last ...
-"Continue working."` after every segment lasting at least one second, up to 100
-resumes within the Task's single Candidate timeout. It does not pass
-`--ephemeral`, `--ignore-user-config`, `--ignore-rules`, or A3S-specific shell
-environment policy overrides. Restricted Tasks apply EdgeBench's
-`web_search="disabled"` configuration to the initial command and every resume.
-
-Codex JSONL evidence must contain `thread.started`, `turn.started`, and a final
-`turn.completed`. New local results bind the SHA-256 of the redacted,
-persisted event bytes into their identity and revalidate that artifact on load.
+contract. Its locked adapter declares the `codex-exec` product protocol, and
+CandidateLock v2 binds the installed Codex CLI version. The selector remains a
+convenience name: Bench resolves it to a normal immutable Candidate adapter and
+uses the same Task, locking, result, and comparison pipeline. Future products
+such as Claude Code can add distinct protocols without adding product branches
+to task or result logic.
 
 A Codex-versus-Claude Code comparison is two ordinary runs over the same
 TaskLock, with one CandidateLock for each exact adapter and model combination.
@@ -604,17 +555,11 @@ P1 begins with the closed shape `runtime { provider = "<registered-id>" }` and
 built-in IDs `docker` and `a3s-box`; additional implementations extend the
 shared typed provider registry, not Bench's command grammar.
 
-Generic reproducibility rejects ambient `A3S_BENCH_*`, `BENCH_*`, model, prompt,
-tool, MCP, Memory, session, shell, proxy, or credential environment variables as
-benchmark input. The Codex preparation and auth-source overrides
-`A3S_BENCH_CODEX_PACKAGE`, `A3S_BENCH_CODEX_BIN`, and
-`A3S_BENCH_CODEX_AUTH_FILE` are explicit operator-controlled inputs. The
-resolved package identity is locked, and auth bytes never enter identity.
+Bench reads no `A3S_BENCH_*`, `BENCH_*`, model, prompt, tool, MCP, Memory,
+session, shell, proxy, or credential environment variable as benchmark input.
 Platform-owned configuration and credentials may be used by the top-level A3S
 clients for authorized resolution, but their resolved semantic choices are
-sealed in locks and their secret bytes never enter a lock or a generic P1 Agent
-or ModelGateway path. The bundled Codex exception is limited to its copied
-per-run `auth.json`; those auth bytes never enter identity.
+sealed in locks and their secret bytes never enter a lock or Agent sandbox.
 For the local Runtime, `.a3s/config.acl` is platform/operator configuration,
 not Task or Candidate input. The Runtime may use it to map an exact locked
 `provider/model` reference to a local or custom inference endpoint. Model
@@ -675,13 +620,13 @@ The Bench-specific P1 grammar is closed:
 | --- | --- | --- |
 | `list` | none | `--all`, `--json` |
 | `info` | exactly one Task reference | `--all` only for a bare catalog ID; `--json` |
-| `run` | exactly one Task reference | exactly one `--agent`; optional `--model`, `--reasoning-effort`, `--locked`, `--json` |
+| `run` | exactly one Task reference | exactly one `--agent`; optional `--model`, `--locked`, `--json` |
 | `result` | zero or one run ID | optional `--out`, `--json` |
 | `advanced init` | exactly one creation path | none |
 | `advanced check` | exactly one local authored TaskBundle directory or root `task.acl` | none |
 | `advanced doctor` | none | none |
 | `advanced task lock` | exactly one non-lock Task source | exactly one `--out` |
-| `advanced candidate lock` | exactly one non-lock Candidate adapter reference | optional `--model`, `--reasoning-effort`; exactly one `--out` |
+| `advanced candidate lock` | exactly one non-lock Candidate adapter reference | optional `--model`; exactly one `--out` |
 | `advanced cancel` | exactly one run ID | none |
 
 Each singleton option may occur once. Options have only the spellings above;
@@ -689,11 +634,6 @@ there are no prefix abbreviations, aliases, positional model/Judge values,
 implicit current-task/current-agent values, or option values read from the
 environment. Top-level `a3s` presentation and confirmation options remain
 top-level and cannot change ExperimentPlan semantics.
-For CandidateLock v3, model and reasoning effort are semantic lock inputs.
-Spark accepts `low`, `medium`, `high`, or `xhigh`; an incompatible ambient or
-CLI value is rejected before execution rather than silently changing model
-configuration.
-
 
 Bench parses arguments as an exact token grammar. An option value is the next
 token and is never split on `=`, commas, or whitespace; `--option=value`, short
@@ -715,12 +655,10 @@ same summary, so `result` is for revisiting a run, not a required second step.
 The public `run-id` names the internal Experiment record; `experiment-id` is
 never a second CLI term.
 
-`latest` means the completed run whose journal committed most recently in this
-project. The result file is persisted first, the completed journal is the
-logical commit point, and only then is the recoverable `latest` index updated.
-An interrupted index update is rebuilt from verified completed journals; an
-uncommitted result can never become latest. `result` may drive reconciliation
-of that
+`latest` means the run whose Experiment record committed most recently in this
+project, ordered by the BenchStore commit sequence rather than wall-clock time
+or completion time. Creating a run atomically moves the pointer; completing an
+older run does not steal it back. `result` may drive reconciliation of that
 same run and commit a Runtime-established terminal fact, but it cannot create a
 new Experiment, submit a new logical Runtime operation, re-resolve a selector,
 or re-run Judge.
@@ -824,7 +762,7 @@ P1 freezes these machine schema identifiers:
 | Object | Schema |
 | --- | --- |
 | exported TaskLock | `a3s.bench.task-lock.v1` |
-| exported CandidateLock | `a3s.bench.candidate-lock.v1` for ordinary Agent Candidates; `a3s.bench.candidate-lock.v3` for Codex |
+| exported CandidateLock | `a3s.bench.candidate-lock.v1` |
 | ExperimentPlan | `a3s.bench.experiment-plan.v1` |
 | Judge request | `bench.judge.request.v1` |
 | Judge result | `bench.judge.result.v1` |
@@ -1051,12 +989,6 @@ The shared capability schema defines two values for `model_gateway`:
 Agent environment. A Judge cannot request a broader scope at runtime. An
 operator may reject an unavailable or disallowed route but cannot substitute a
 different outcome-affecting model without producing a different plan.
-
-In the current built-in catalog, `college_english_exam_bank` is the only
-model-backed Judge. It uses the operator-configured, lock-bound
-`bench.judge_model` route. The remaining 51 Judges are deterministic programs
-or protected game services and retain their Task-owned evaluation semantics.
-The canonical batch does not override or constrain the configured Judge model.
 
 For both roles, `network = "none"` is a deny-all socket policy, not merely an
 empty outbound allowlist. Runtime denies DNS, loopback, link-local and metadata

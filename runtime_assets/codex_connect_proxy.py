@@ -43,6 +43,7 @@ _EXACT_HOSTS = frozenset(
     }
 )
 _CONTENT_HOST = re.compile(r"^sdmntpr[a-z0-9-]+\.oaiusercontent\.com$")
+_TASK_EXACT_HOSTS: frozenset[str] = frozenset()
 _DNS_HOST = re.compile(
     r"^(?=.{1,253}$)(?:[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?)"
     r"(?:\.(?:[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?))*$"
@@ -52,6 +53,24 @@ _DNS_SLOTS = threading.BoundedSemaphore(MAX_DNS_PROCESSES)
 
 class ProxyRequestError(ValueError):
     """The client sent a request that this proxy must not forward."""
+
+
+def validate_task_allow_host(host: str) -> str:
+    """Validate one canonical exact DNS host supplied by the locked Task."""
+    if (
+        not host
+        or len(host) > 253
+        or not host.isascii()
+        or host != host.lower()
+        or host.endswith(".")
+        or not _DNS_HOST.fullmatch(host)
+    ):
+        raise ProxyRequestError("Task allow host is not a canonical lowercase DNS hostname")
+    try:
+        ipaddress.ip_address(host)
+    except ValueError:
+        return host
+    raise ProxyRequestError("Task allow host must not be an IP literal")
 
 
 def validate_authority(authority: str) -> tuple[str, int]:
@@ -72,7 +91,11 @@ def validate_authority(authority: str) -> tuple[str, int]:
         pass
     else:
         raise ProxyRequestError("IP literals are forbidden")
-    if host not in _EXACT_HOSTS and not _CONTENT_HOST.fullmatch(host):
+    if (
+        host not in _EXACT_HOSTS
+        and host not in _TASK_EXACT_HOSTS
+        and not _CONTENT_HOST.fullmatch(host)
+    ):
         raise ProxyRequestError("destination is not allowed")
     return host, 443
 
@@ -638,6 +661,7 @@ class ThreadedConnectProxy(socketserver.ThreadingMixIn, socketserver.TCPServer):
 
 
 def main() -> None:
+    global _TASK_EXACT_HOSTS
     parser = argparse.ArgumentParser(description="destination-restricted Codex CONNECT proxy")
     binding = parser.add_mutually_exclusive_group()
     binding.add_argument(
@@ -651,9 +675,22 @@ def main() -> None:
         help="auto-bind the sole non-default-route internal IPv4 (the safe default)",
     )
     parser.add_argument("--port", type=int, default=3128)
+    parser.add_argument(
+        "--allow-host",
+        action="append",
+        default=[],
+        metavar="EXACT_DNS_HOST",
+        help="allow one locked Task HTTPS destination (repeatable)",
+    )
     arguments = parser.parse_args()
     if not 1 <= arguments.port <= 65535:
         parser.error("--port must be between 1 and 65535")
+    try:
+        _TASK_EXACT_HOSTS = frozenset(
+            validate_task_allow_host(host) for host in arguments.allow_host
+        )
+    except ProxyRequestError as error:
+        parser.error(str(error))
     if arguments.listen is not None:
         try:
             explicit = ipaddress.ip_address(arguments.listen)

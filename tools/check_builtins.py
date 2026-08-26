@@ -36,6 +36,16 @@ EXPECTED_WORKSPACE_IMPORTS = {
         }
     ]
 }
+PYPI_ALLOW_HOSTS = ["files.pythonhosted.org", "pypi.org"]
+EXPECTED_NETWORK_ALLOW_HOSTS = {
+    "cta_risk_budget_optimization": PYPI_ALLOW_HOSTS,
+    "k12_math_recommendation": PYPI_ALLOW_HOSTS,
+    "schemathesis_config_modernization": PYPI_ALLOW_HOSTS,
+    "schemathesis_datagen_pipeline": PYPI_ALLOW_HOSTS,
+    "schemathesis_reporting_observability": PYPI_ALLOW_HOSTS,
+    "exchange_core_throughput": ["repo.maven.apache.org"],
+    "new_foundations_consistency": ["github.com"],
+}
 ORDER_ADDITION_OLD_HELPER_SHA256 = (
     "3023b9a449119e862d4ca86d3ab45599e2496e182be82959a642522f915dbbac"
 )
@@ -190,6 +200,19 @@ def main() -> None:
             record.get("workspace_imports", []) == expected_imports,
             f"workspace import provenance: {task_id}",
         )
+        expected_network_hosts = EXPECTED_NETWORK_ALLOW_HOSTS.get(task_id, [])
+        network_adaptation = record.get("network_adaptation")
+        if expected_network_hosts:
+            require(
+                network_adaptation is not None
+                and network_adaptation["network_need"] == "restricted_https"
+                and network_adaptation["https_allow_hosts"] == expected_network_hosts
+                and isinstance(network_adaptation["reason"], str)
+                and network_adaptation["reason"],
+                f"network adaptation provenance: {task_id}",
+            )
+        else:
+            require(network_adaptation is None, f"unexpected network adaptation: {task_id}")
         for relative, path in generated.items():
             require(
                 record["generated_sha256"][relative] == f"sha256:{sha256(path)}",
@@ -241,6 +264,28 @@ def main() -> None:
             and parsed_imports == expected_imports,
             f"workspace imports: {task_id}",
         )
+        allow_match = re.search(
+            r"^\s*https_allow_hosts\s*=\s*\[(.*?)\]",
+            work_acl,
+            re.MULTILINE | re.DOTALL,
+        )
+        parsed_network_hosts = (
+            re.findall(r'"([a-z0-9.-]+)"', allow_match.group(1))
+            if allow_match
+            else []
+        )
+        require(
+            parsed_network_hosts == expected_network_hosts,
+            f"HTTPS allow hosts: {task_id}",
+        )
+        network_need = re.findall(
+            r'^\s*network_need\s*=\s*"([a-z_]+)"\s*$',
+            work_acl,
+            re.MULTILINE,
+        )
+        require(len(network_need) == 1, f"network need: {task_id}")
+        if expected_network_hosts:
+            require(network_need == ["restricted_https"], f"restricted network: {task_id}")
         require_acl_integer(
             work_acl, "cpu_limit", resources["work"]["cpu_limit"], task_id
         )
@@ -293,6 +338,32 @@ def main() -> None:
                 and ORDER_ADDITION_ACTUAL_HELPER_SHA256 in source_command,
                 "Order Addition helper hash adaptation",
             )
+        if task_id == "cta_risk_budget_optimization":
+            source_command = descriptor["evaluation"]["source_command"]
+            for required in (
+                "--target /tmp/a3s-judge-deps-cta",
+                "pandas==1.5.3",
+                "numpy==1.23.5",
+                "scipy==1.10.1",
+                "scikit-learn==1.2.2",
+                "statsmodels==0.13.5",
+                "matplotlib==3.7.1",
+                "openpyxl==3.1.2",
+                "PYTHONPATH=/tmp/a3s-judge-deps-cta",
+                "|| exit 125;",
+            ):
+                require(required in source_command, f"CTA Judge dependency adapter: {required}")
+            require("requirements.txt" not in source_command, "CTA Judge trusts submission requirements")
+        if task_id == "k12_math_recommendation":
+            source_command = descriptor["evaluation"]["source_command"]
+            require(
+                "--no-deps --target /tmp/a3s-judge-deps-k12" in source_command
+                and "networkx==3.3" in source_command
+                and "PYTHONPATH=/tmp/a3s-judge-deps-k12" in source_command,
+                "K12 Judge dependency adapter",
+            )
+            require("|| exit 125;" in source_command, "K12 Judge install is not fail-closed")
+            require("requirements.txt" not in source_command, "K12 Judge trusts submission requirements")
         modes[descriptor["evaluation"]["mode"]] += 1
         model_gateway_count += int("model_gateway" in descriptor["requirements"])
 

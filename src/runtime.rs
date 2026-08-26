@@ -795,6 +795,7 @@ mod tests {
             work_image: "docker.io/library/alpine:3.20".into(),
             work_platform: None,
             work_network_need: "none".into(),
+            work_network_allow_hosts: vec![],
             candidate_timeout_sec: 3,
             metrics: vec![],
             workspace_seed: None,
@@ -838,6 +839,7 @@ mod tests {
             work_image: "alpine".into(),
             work_platform: None,
             work_network_need: "none".into(),
+            work_network_allow_hosts: vec![],
             candidate_timeout_sec: 300,
             metrics: vec![MetricInfo {
                 name: "correctness".into(),

@@ -18,11 +18,14 @@ bench "new_foundations_consistency" {
   work {
     cpu_limit    = 8
     memory_bytes = 17179869184
+    https_allow_hosts = [
+      "github.com",
+    ]
 
     image {
       ref = "docker.io/seededge/edgebench.work.new_foundations_consistency:9fdeea94c0b5"
     }
-    network_need = "none"
+    network_need = "restricted_https"
   }
 
   submission {

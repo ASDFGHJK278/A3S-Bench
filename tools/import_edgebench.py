@@ -47,7 +47,50 @@ WORKSPACE_IMPORTS = {
         }
     ]
 }
+PYPI_ALLOW_HOSTS = ["files.pythonhosted.org", "pypi.org"]
+NETWORK_ALLOW_HOSTS = {
+    "cta_risk_budget_optimization": PYPI_ALLOW_HOSTS,
+    "k12_math_recommendation": PYPI_ALLOW_HOSTS,
+    "schemathesis_config_modernization": PYPI_ALLOW_HOSTS,
+    "schemathesis_datagen_pipeline": PYPI_ALLOW_HOSTS,
+    "schemathesis_reporting_observability": PYPI_ALLOW_HOSTS,
+    "exchange_core_throughput": ["repo.maven.apache.org"],
+    "new_foundations_consistency": ["github.com"],
+}
+NETWORK_ADAPTATION_REASONS = {
+    "cta_risk_budget_optimization": "Allows only PyPI HTTPS hosts so the Candidate can install the source-declared exact required scientific Python dependencies missing from the pinned Work image.",
+    "k12_math_recommendation": "Allows only PyPI HTTPS hosts so the Candidate can install source-declared required networkx, which is missing from the pinned Work image.",
+    "schemathesis_config_modernization": "Allows only PyPI HTTPS hosts for source-declared Python dependencies missing from the pinned Work image.",
+    "schemathesis_datagen_pipeline": "Allows only PyPI HTTPS hosts for source-declared Python dependencies missing from the pinned Work image.",
+    "schemathesis_reporting_observability": "Allows only PyPI HTTPS hosts for source-declared Python dependencies missing from the pinned Work image; container-local loopback remains direct.",
+    "exchange_core_throughput": "Allows only Maven Central HTTPS in addition to the isolated Maven repository imported from the pinned Work image.",
+    "new_foundations_consistency": "Allows only github.com HTTPS for the task-required doc-gen4 clone; this is an intentional A3S deviation from the source internet=false setting and exposes GitHub-controlled mutable content.",
+}
 JUDGE_COMMAND_ADAPTATIONS = {
+    "cta_risk_budget_optimization": (
+        (
+            "cd /home/workspace && python3 scoring/score.py",
+            "rm -rf /tmp/a3s-judge-deps-cta && "
+            "python3 -m pip install --isolated --disable-pip-version-check --no-input "
+            "--only-binary=:all: --target /tmp/a3s-judge-deps-cta "
+            "--index-url https://pypi.org/simple "
+            "pandas==1.5.3 numpy==1.23.5 scipy==1.10.1 "
+            "scikit-learn==1.2.2 statsmodels==0.13.5 matplotlib==3.7.1 "
+            "openpyxl==3.1.2 || exit 125; cd /home/workspace && "
+            "PYTHONPATH=/tmp/a3s-judge-deps-cta python3 scoring/score.py",
+        ),
+    ),
+    "k12_math_recommendation": (
+        (
+            "cd /home/workspace && python3 scoring/score.py",
+            "rm -rf /tmp/a3s-judge-deps-k12 && "
+            "python3 -m pip install --isolated --disable-pip-version-check --no-input "
+            "--only-binary=:all: --no-deps --target /tmp/a3s-judge-deps-k12 "
+            "--index-url https://pypi.org/simple networkx==3.3 || exit 125; "
+            "cd /home/workspace && "
+            "PYTHONPATH=/tmp/a3s-judge-deps-k12 python3 scoring/score.py",
+        ),
+    ),
     "order_addition_permutation_optimization": (
         (
             "python -m pytest tests/test_final_result.py -s -v",
@@ -273,7 +316,18 @@ def render_task_acl(
 ) -> str:
     task_id = task["task_id"]
     work_ref = image_ref(task_id, "work", task["work"]["image_tag"])
-    network = "public_internet" if task.get("internet", True) else "none"
+    network_allow_hosts = NETWORK_ALLOW_HOSTS.get(task_id, [])
+    network = (
+        "restricted_https"
+        if network_allow_hosts
+        else "public_internet" if task.get("internet", True) else "none"
+    )
+    network_allow_acl = (
+        "\n    https_allow_hosts = "
+        + acl_list(network_allow_hosts, indent="      ")
+        if network_allow_hosts
+        else ""
+    )
     include = acl_list(task["submit_paths"], indent="      ")
     exclude = acl_list(normalized_excludes(task), indent="      ")
     eval_timeout = int(task["judge"].get("eval_timeout", 600))
@@ -307,7 +361,7 @@ bench {acl_string(task_id)} {{
 
   work {{
     cpu_limit    = {resources["work"]["cpu_limit"]}
-    memory_bytes = {resources["work"]["memory_bytes"]}{workspace_imports}
+    memory_bytes = {resources["work"]["memory_bytes"]}{network_allow_acl}{workspace_imports}
 
     image {{
       ref = {acl_string(work_ref)}
@@ -586,6 +640,17 @@ def main() -> None:
                 "modified": True,
                 "resolved_resources": resources,
                 **(
+                    {
+                        "network_adaptation": {
+                            "network_need": "restricted_https",
+                            "https_allow_hosts": NETWORK_ALLOW_HOSTS[task_id],
+                            "reason": NETWORK_ADAPTATION_REASONS[task_id],
+                        }
+                    }
+                    if task_id in NETWORK_ALLOW_HOSTS
+                    else {}
+                ),
+                **(
                     {"workspace_imports": WORKSPACE_IMPORTS[task_id]}
                     if task_id in WORKSPACE_IMPORTS
                     else {}
@@ -635,6 +700,8 @@ def main() -> None:
             "Renamed the normalized primary metric to the native name score.",
             "Resolved work and Judge resource limits from the pinned official Codex experiment.",
             "Imported the Exchange Core Maven repository from the protected Work image into an isolated per-run Candidate volume at the observed agent-user Maven repository path without copying sibling Maven configuration.",
+            "Added task-scoped exact-host HTTPS allowlists for seven source compatibility gaps while retaining internal-network Candidate isolation; the New Foundations github.com grant intentionally deviates from source internet=false and remains mutable external input.",
+            "Added fail-closed CTA and K12 Judge adapters that install only source-declared required dependencies from an explicit PyPI index into isolated temporary targets; installation failure exits through the Judge-invalid code path and submission-controlled requirements are never evaluated.",
             "Reapplied A3S fail-closed Judge command adaptations for the stale Order Addition helper hash and the git_rewrite_in_zig and rust_multicrate_reconstruction runtime incompatibilities.",
         ],
         "redistribution": (

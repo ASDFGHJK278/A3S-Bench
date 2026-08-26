@@ -791,7 +791,7 @@ pub fn execute(request: CodexExecutionRequest<'_>) -> Result<CodexOutcome> {
             connect_candidate_to_game_network(&resources, &container_id, network)?;
         }
         if restricted_network {
-            start_proxy_sidecar(&resources)?;
+            start_proxy_sidecar(&resources, request.task)?;
         }
         let mut command = Command::new("docker");
         command.args(["start", "--attach", &container_id]);
@@ -890,7 +890,14 @@ fn build_codex_run_command(
         request.workspace_imports,
         container_workspace,
     )?;
-    add_proxy_environment(&mut command, resources, request.game_network)?;
+    add_proxy_environment(
+        &mut command,
+        request.task,
+        resources,
+        request.game_network,
+        request.workspace_imports,
+        container_workspace,
+    )?;
     add_game_environment(&mut command, request.game_network)?;
     request.package.verify_for_mount()?;
     let codex_args = codex_argv(request, prompt, &entrypoint);
@@ -1050,7 +1057,12 @@ fn codex_argv(request: &CodexExecutionRequest<'_>, prompt: &str, entrypoint: &st
         entrypoint.into(),
         request.model.unwrap_or_default().into(),
         request.reasoning_effort.unwrap_or_default().into(),
-        if request.task.work_network_need == "none" {
+        if request.task.work_network_need != "public_internet" {
+            "1".into()
+        } else {
+            "0".into()
+        },
+        if request.task.work_network_need == "restricted_https" {
             "1".into()
         } else {
             "0".into()
@@ -1101,7 +1113,7 @@ fn container_path(relative: &str) -> String {
 
 fn task_uses_restricted_network(task: &TaskInfo) -> Result<bool> {
     match task.work_network_need.as_str() {
-        "none" => Ok(true),
+        "none" | "restricted_https" => Ok(true),
         "public_internet" => Ok(false),
         value => anyhow::bail!("unsupported Codex Task network need {value:?}"),
     }
@@ -1168,13 +1180,20 @@ fn add_game_environment(command: &mut Command, game_network: Option<(&str, &str)
 
 fn add_proxy_environment(
     command: &mut Command,
+    task: &TaskInfo,
     resources: &CodexResources,
     game_network: Option<(&str, &str)>,
+    workspace_imports: &crate::runtime::PreparedWorkspaceImports,
+    container_workspace: &str,
 ) -> Result<()> {
     let Some(proxy) = resources.proxy_container.as_deref() else {
         return Ok(());
     };
-    let no_proxy = game_server_host(game_network)?.unwrap_or_default();
+    let mut no_proxy = vec!["localhost", "127.0.0.1", "::1"];
+    if let Some(game_host) = game_server_host(game_network)? {
+        no_proxy.push(game_host);
+    }
+    let no_proxy = no_proxy.join(",");
     let endpoint = format!("http://{proxy}:{PROXY_PORT}");
     for name in [
         "HTTP_PROXY",
@@ -1191,7 +1210,39 @@ fn add_proxy_environment(
         .arg(format!("NO_PROXY={no_proxy}"))
         .arg("--env")
         .arg(format!("no_proxy={no_proxy}"));
+    if task
+        .work_network_allow_hosts
+        .iter()
+        .any(|host| host == "pypi.org")
+    {
+        command
+            .args(["--env", "PIP_INDEX_URL=https://pypi.org/simple"])
+            .args(["--env", "PIP_TRUSTED_HOST="]);
+    }
+    if task
+        .work_network_allow_hosts
+        .iter()
+        .any(|host| host == "repo.maven.apache.org")
+    {
+        let existing = workspace_imports
+            .environment(container_workspace)
+            .into_iter()
+            .find_map(|(name, value)| (name == "MAVEN_OPTS").then_some(value));
+        let options = maven_proxy_options(existing.as_deref(), proxy);
+        command.arg("--env").arg(format!("MAVEN_OPTS={options}"));
+    }
     Ok(())
+}
+
+fn maven_proxy_options(existing: Option<&str>, proxy: &str) -> String {
+    let mut options = existing.unwrap_or_default().to_owned();
+    if !options.is_empty() {
+        options.push(' ');
+    }
+    options.push_str(&format!(
+        "-Dhttps.proxyHost={proxy} -Dhttps.proxyPort={PROXY_PORT} -Dhttp.proxyHost={proxy} -Dhttp.proxyPort={PROXY_PORT} -Dhttp.nonProxyHosts=localhost|127.*|[::1]"
+    ));
+    options
 }
 
 fn ensure_proxy_helper_image() -> Result<()> {
@@ -1649,7 +1700,7 @@ fn remove_internal_network(network: &str) -> Result<()> {
     anyhow::bail!("Docker internal network still exists after cleanup")
 }
 
-fn build_proxy_create_command(resources: &CodexResources) -> Result<Command> {
+fn build_proxy_create_command(resources: &CodexResources, task: &TaskInfo) -> Result<Command> {
     let proxy = resources
         .proxy_container
         .as_deref()
@@ -1690,15 +1741,18 @@ fn build_proxy_create_command(resources: &CodexResources) -> Result<Command> {
         "--port",
         &PROXY_PORT.to_string(),
     ]);
+    for host in &task.work_network_allow_hosts {
+        command.args(["--allow-host", host]);
+    }
     Ok(command)
 }
 
-fn create_proxy_container(resources: &CodexResources) -> Result<String> {
+fn create_proxy_container(resources: &CodexResources, task: &TaskInfo) -> Result<String> {
     let proxy = resources
         .proxy_container
         .as_deref()
         .ok_or_else(|| anyhow::anyhow!("Codex proxy container resource is unavailable"))?;
-    let mut command = build_proxy_create_command(resources)?;
+    let mut command = build_proxy_create_command(resources, task)?;
     let (output, timed_out) = output_with_timeout(&mut command, CONTAINER_STAGING_TIMEOUT)
         .context("could not create the Codex CONNECT proxy")?;
     if timed_out {
@@ -1866,8 +1920,8 @@ fn container_network_ipv4(container_id: &str, network: &str) -> Result<String> {
     Ok(value)
 }
 
-fn start_proxy_sidecar(resources: &CodexResources) -> Result<()> {
-    let proxy_id = create_proxy_container(resources)?;
+fn start_proxy_sidecar(resources: &CodexResources, task: &TaskInfo) -> Result<()> {
+    let proxy_id = create_proxy_container(resources, task)?;
     connect_proxy_to_bridge(resources, &proxy_id)?;
     let mut command = Command::new("docker");
     command.args(["start", &proxy_id]);
@@ -2602,6 +2656,7 @@ mod tests {
             work_image: "alpine:3.20".into(),
             work_platform: Some("linux/amd64".into()),
             work_network_need: "none".into(),
+            work_network_allow_hosts: vec![],
             candidate_timeout_sec: 1,
             metrics: vec![],
             workspace_seed: Some(crate::task::WorkspaceSeed {
@@ -2725,6 +2780,9 @@ mod tests {
             resources.proxy_container.as_deref().unwrap()
         );
         assert!(args.iter().any(|arg| arg == &proxy_url));
+        assert!(args
+            .windows(2)
+            .any(|pair| pair == ["--env", "NO_PROXY=localhost,127.0.0.1,::1"]));
         assert!(!args.iter().any(|arg| arg.starts_with("GAME_SERVER_URL=")));
         assert!(!args.iter().any(|arg| {
             matches!(
@@ -2734,13 +2792,14 @@ mod tests {
         }));
         let image_index = args.iter().position(|arg| arg == "alpine:3.20").unwrap();
         assert_eq!(
-            &args[image_index + 1..image_index + 7],
+            &args[image_index + 1..image_index + 8],
             [
                 "/etc/codex/run_loop.sh",
                 "/opt/a3s/codex/bin/codex",
                 "gpt-5.3-codex-spark",
                 "low",
                 "1",
+                "0",
                 "prompt",
             ]
         );
@@ -2773,13 +2832,14 @@ mod tests {
             .position(|arg| arg == "alpine:3.20")
             .unwrap();
         assert_eq!(
-            &spark_args[spark_image_index + 1..spark_image_index + 7],
+            &spark_args[spark_image_index + 1..spark_image_index + 8],
             [
                 "/etc/codex/run_loop.sh",
                 "/opt/a3s/codex/bin/codex",
                 "gpt-5.3-codex-spark",
                 "low",
                 "1",
+                "0",
                 "spark prompt",
             ]
         );
@@ -2800,12 +2860,18 @@ mod tests {
                 "GAME_SERVER_URL=http://a3s-bench-game-container:8000",
             ]
         }));
-        assert!(game_args
-            .windows(2)
-            .any(|pair| { pair == ["--env", "NO_PROXY=a3s-bench-game-container"] }));
-        assert!(game_args
-            .windows(2)
-            .any(|pair| { pair == ["--env", "no_proxy=a3s-bench-game-container"] }));
+        assert!(game_args.windows(2).any(|pair| {
+            pair == [
+                "--env",
+                "NO_PROXY=localhost,127.0.0.1,::1,a3s-bench-game-container",
+            ]
+        }));
+        assert!(game_args.windows(2).any(|pair| {
+            pair == [
+                "--env",
+                "no_proxy=localhost,127.0.0.1,::1,a3s-bench-game-container",
+            ]
+        }));
         assert!(game_args
             .windows(2)
             .any(|pair| pair == ["--network", resources.internal_network.as_deref().unwrap()]));
@@ -2875,7 +2941,7 @@ mod tests {
 
     #[cfg(unix)]
     #[test]
-    fn edgebench_stop_hook_always_blocks_completion() {
+    fn edgebench_stop_hook_accepts_repeated_convergence_claims() {
         use std::io::Write;
         use std::os::unix::fs::PermissionsExt;
         use std::process::Stdio;
@@ -2884,6 +2950,7 @@ mod tests {
         let harness = stage_codex_harness_assets(root.path()).unwrap();
         let script = harness.join(STOP_HOOK_SCRIPT_NAME);
         let run_loop = harness.join(RUN_LOOP_SCRIPT_NAME);
+        let review_dir = root.path().join("stop-review");
         assert_eq!(
             std::fs::metadata(&script).unwrap().permissions().mode() & 0o777,
             0o555
@@ -2899,6 +2966,7 @@ mod tests {
         let run = |input: &str| {
             let mut child = Command::new("/bin/sh")
                 .arg(&script)
+                .env("A3S_CODEX_STOP_REVIEW_DIR", &review_dir)
                 .stdin(Stdio::piped())
                 .stdout(Stdio::piped())
                 .spawn()
@@ -2912,20 +2980,49 @@ mod tests {
             drop(child.stdin.take());
             child.wait_with_output().unwrap()
         };
-        for input in [
-            r#"{"stop_hook_active":false}"#,
-            r#"{"stop_hook_active":true}"#,
-            r#"{ "stop_hook_active": true }"#,
-        ] {
-            let output = run(input);
+        let block = run(
+            r#"{"stop_hook_active":false,"last_assistant_message":"Implemented the change and all tests pass."}"#,
+        );
+        let block = serde_json::from_slice::<Value>(&block.stdout).unwrap();
+        assert_eq!(block["decision"], "block");
+        assert!(block["reason"].as_str().unwrap().contains("Review"));
+
+        for expected in ["1/10", "2/10"] {
+            let output = run(
+                r#"{"stop_hook_active":true,"last_assistant_message":"No further safe changes are warranted."}"#,
+            );
             assert!(output.status.success());
             let value = serde_json::from_slice::<Value>(&output.stdout).unwrap();
             assert_eq!(value["decision"], "block");
-            assert_eq!(
-                value["reason"],
-                "Do not stop. Continue working on the implementation."
-            );
+            assert!(value["reason"].as_str().unwrap().contains(expected));
         }
+
+        let reset = run(
+            r#"{"stop_hook_active":true,"last_assistant_message":"I found another issue, fixed it, and verified the test."}"#,
+        );
+        assert_eq!(
+            serde_json::from_slice::<Value>(&reset.stdout).unwrap()["decision"],
+            "block"
+        );
+
+        for expected in 1..10 {
+            let output = run(
+                r#"{"stop_hook_active":true,"last_assistant_message":"已经足够稳定，无需进一步修改。"}"#,
+            );
+            let value = serde_json::from_slice::<Value>(&output.stdout).unwrap();
+            assert_eq!(value["decision"], "block");
+            let expected = format!("{expected}/10");
+            assert!(value["reason"].as_str().unwrap().contains(&expected));
+        }
+        let accepted = run(
+            r#"{"stop_hook_active":true,"last_assistant_message":"No further meaningful edits can be identified."}"#,
+        );
+        assert!(accepted.status.success());
+        assert_eq!(
+            serde_json::from_slice::<Value>(&accepted.stdout).unwrap(),
+            serde_json::json!({})
+        );
+        assert!(review_dir.join("accepted").is_file());
     }
 
     #[cfg(unix)]
@@ -2946,7 +3043,7 @@ mod tests {
         let output = Command::new("/bin/sh")
             .arg(harness.join(RUN_LOOP_SCRIPT_NAME))
             .arg(&fake_codex)
-            .args(["gpt-5.3-codex-spark", "low", "1", "prompt"])
+            .args(["gpt-5.3-codex-spark", "low", "1", "0", "prompt"])
             .env("RUN_LOOP_LOG", &log)
             .output()
             .unwrap();
@@ -2955,17 +3052,72 @@ mod tests {
             "{}",
             String::from_utf8_lossy(&output.stderr)
         );
-        let calls = std::fs::read_to_string(log).unwrap();
+        let calls = std::fs::read_to_string(&log).unwrap();
         let calls = calls.lines().collect::<Vec<_>>();
         assert_eq!(calls.len(), 2);
         assert_eq!(
             calls[0],
-            "exec -c web_search=\"disabled\" --dangerously-bypass-approvals-and-sandbox --json --skip-git-repo-check -c features.hooks=true --disable image_generation -c model_reasoning_summary=none --model gpt-5.3-codex-spark -c model_reasoning_effort=low -- prompt"
+            "exec -c allow_login_shell=false -c web_search=\"disabled\" --dangerously-bypass-approvals-and-sandbox --json --skip-git-repo-check -c features.hooks=true --disable image_generation -c model_reasoning_summary=none --model gpt-5.3-codex-spark -c model_reasoning_effort=low -- prompt"
         );
         assert_eq!(
             calls[1],
-            "exec -c web_search=\"disabled\" resume --last --dangerously-bypass-approvals-and-sandbox --json --skip-git-repo-check -c features.hooks=true --disable image_generation -c model_reasoning_summary=none --model gpt-5.3-codex-spark -c model_reasoning_effort=low Continue working."
+            "exec -c allow_login_shell=false -c web_search=\"disabled\" resume --last --dangerously-bypass-approvals-and-sandbox --json --skip-git-repo-check -c features.hooks=true --disable image_generation -c model_reasoning_summary=none --model gpt-5.3-codex-spark -c model_reasoning_effort=low Continue working."
         );
+
+        std::fs::write(&log, "").unwrap();
+        let output = Command::new("/bin/sh")
+            .arg(harness.join(RUN_LOOP_SCRIPT_NAME))
+            .arg(&fake_codex)
+            .args(["gpt-5.3-codex-spark", "low", "1", "1", "prompt"])
+            .env("RUN_LOOP_LOG", &log)
+            .env("HTTP_PROXY", "http://proxy:3128")
+            .env("HTTPS_PROXY", "http://proxy:3128")
+            .env("http_proxy", "http://proxy:3128")
+            .env("https_proxy", "http://proxy:3128")
+            .env("NO_PROXY", "localhost,127.0.0.1,::1")
+            .env("no_proxy", "localhost,127.0.0.1,::1")
+            .env("PIP_INDEX_URL", "https://pypi.org/simple")
+            .env("PIP_TRUSTED_HOST", "")
+            .env("MAVEN_OPTS", "-Dhttps.proxyHost=proxy")
+            .output()
+            .unwrap();
+        assert!(output.status.success());
+        let calls = std::fs::read_to_string(&log).unwrap();
+        for required in [
+            "-c allow_login_shell=false",
+            "shell_environment_policy.set.HTTP_PROXY=\"http://proxy:3128\"",
+            "shell_environment_policy.set.HTTPS_PROXY=\"http://proxy:3128\"",
+            "shell_environment_policy.set.NO_PROXY=\"localhost,127.0.0.1,::1\"",
+            "shell_environment_policy.set.PIP_INDEX_URL=\"https://pypi.org/simple\"",
+            "shell_environment_policy.set.PIP_TRUSTED_HOST=\"\"",
+            "shell_environment_policy.set.MAVEN_OPTS=\"-Dhttps.proxyHost=proxy\"",
+        ] {
+            assert!(
+                calls.lines().all(|call| call.contains(required)),
+                "{required}"
+            );
+        }
+
+        std::fs::write(&log, "").unwrap();
+        let review_dir = root.path().join("run-loop-stop-review");
+        std::fs::write(
+            &fake_codex,
+            "#!/bin/sh\nprintf '%s\\n' \"$*\" >>\"$RUN_LOOP_LOG\"\nmkdir -p \"$A3S_CODEX_STOP_REVIEW_DIR\"\n: >\"$A3S_CODEX_STOP_REVIEW_DIR/accepted\"\nsleep 1\n",
+        )
+        .unwrap();
+        std::fs::set_permissions(&fake_codex, std::fs::Permissions::from_mode(0o755)).unwrap();
+        let output = Command::new("/bin/sh")
+            .arg(harness.join(RUN_LOOP_SCRIPT_NAME))
+            .arg(&fake_codex)
+            .args(["gpt-5.3-codex-spark", "low", "1", "0", "prompt"])
+            .env("RUN_LOOP_LOG", &log)
+            .env("A3S_CODEX_STOP_REVIEW_DIR", &review_dir)
+            .output()
+            .unwrap();
+        assert!(output.status.success());
+        assert_eq!(std::fs::read_to_string(&log).unwrap().lines().count(), 1);
+        assert!(String::from_utf8_lossy(&output.stderr)
+            .contains("accepted repeated convergence claims"));
     }
 
     #[test]
@@ -2980,6 +3132,7 @@ mod tests {
             work_image: "alpine:3.20".into(),
             work_platform: None,
             work_network_need: "none".into(),
+            work_network_allow_hosts: vec![],
             candidate_timeout_sec: 1,
             metrics: vec![],
             workspace_seed: None,
@@ -3037,7 +3190,15 @@ mod tests {
             false,
         )
         .unwrap();
-        add_proxy_environment(&mut public_command, &public_resources, None).unwrap();
+        add_proxy_environment(
+            &mut public_command,
+            &public_task,
+            &public_resources,
+            None,
+            &Default::default(),
+            "/app",
+        )
+        .unwrap();
         let public_args = public_command
             .get_args()
             .map(|arg| arg.to_string_lossy().into_owned())
@@ -3081,7 +3242,14 @@ mod tests {
     #[test]
     fn proxy_sidecar_is_hardened_and_has_no_candidate_mounts() {
         let resources = CodexResources::new("a3s-bench-codex-proxy-test".into(), true);
-        let command = build_proxy_create_command(&resources).unwrap();
+        let mut task = crate::task::load_local(
+            &Path::new(env!("CARGO_MANIFEST_DIR"))
+                .join("builtin/tasks/cta_risk_budget_optimization"),
+        )
+        .unwrap();
+        task.work_network_need = "restricted_https".into();
+        task.work_network_allow_hosts = vec!["files.pythonhosted.org".into(), "pypi.org".into()];
+        let command = build_proxy_create_command(&resources, &task).unwrap();
         let args = command
             .get_args()
             .map(|arg| arg.to_string_lossy().into_owned())
@@ -3105,6 +3273,12 @@ mod tests {
             .any(|pair| pair == ["--entrypoint", "python3"]));
         assert!(args.iter().any(|arg| arg == PROXY_HELPER_IMAGE));
         assert!(args.iter().any(|arg| arg == "--bind-internal"));
+        assert!(args
+            .windows(2)
+            .any(|pair| pair == ["--allow-host", "pypi.org"]));
+        assert!(args
+            .windows(2)
+            .any(|pair| pair == ["--allow-host", "files.pythonhosted.org"]));
         assert!(!args.iter().any(|arg| arg == "0.0.0.0"));
         let bridge = build_proxy_bridge_connect_command("proxy-container-id");
         assert_eq!(
@@ -3136,12 +3310,44 @@ mod tests {
         ] {
             assert!(!args.iter().any(|arg| arg.contains(private)));
         }
+        let proxy = resources.proxy_container.as_deref().unwrap();
+        let mut environment = Command::new("docker");
+        add_proxy_environment(
+            &mut environment,
+            &task,
+            &resources,
+            None,
+            &Default::default(),
+            "/workspace",
+        )
+        .unwrap();
+        let environment = environment
+            .get_args()
+            .map(|arg| arg.to_string_lossy().into_owned())
+            .collect::<Vec<_>>();
+        assert!(environment
+            .windows(2)
+            .any(|pair| pair == ["--env", "PIP_INDEX_URL=https://pypi.org/simple"]));
+        assert!(environment
+            .windows(2)
+            .any(|pair| pair == ["--env", "NO_PROXY=localhost,127.0.0.1,::1"]));
+        assert_eq!(
+            maven_proxy_options(Some("-Dmaven.repo.local=/cache"), proxy),
+            format!(
+                "-Dmaven.repo.local=/cache -Dhttps.proxyHost={proxy} -Dhttps.proxyPort={PROXY_PORT} -Dhttp.proxyHost={proxy} -Dhttp.proxyPort={PROXY_PORT} -Dhttp.nonProxyHosts=localhost|127.*|[::1]"
+            )
+        );
     }
 
     #[test]
     #[ignore = "requires Docker, the local python helper image, and public DNS/TLS"]
     fn docker_proxy_network_blocks_direct_and_enforces_connect_policy() {
         let root = tempfile::tempdir().unwrap();
+        let task = crate::task::load_local(
+            &Path::new(env!("CARGO_MANIFEST_DIR"))
+                .join("builtin/tasks/cta_risk_budget_optimization"),
+        )
+        .unwrap();
         let resources = CodexResources::new(container_name(), true);
         let probe_container = format!("{}-probe", resources.main_container);
         let outcome = (|| -> Result<()> {
@@ -3180,7 +3386,7 @@ mod tests {
                 &asset,
                 &format!("{PROXY_STAGING_PARENT}/{PROXY_SCRIPT_NAME}"),
             )?;
-            start_proxy_sidecar(&resources)?;
+            start_proxy_sidecar(&resources, &task)?;
             let proxy_id = owned_container_id(resources.proxy_container.as_deref().unwrap())?
                 .ok_or_else(|| anyhow::anyhow!("Docker proxy test sidecar disappeared"))?;
             anyhow::ensure!(
@@ -3193,7 +3399,7 @@ mod tests {
             );
 
             let script = r#"
-import socket, ssl, sys
+import http.server, socket, ssl, sys, threading, urllib.request
 proxy = sys.argv[1]
 try:
     direct = socket.create_connection(("1.1.1.1", 443), 2)
@@ -3227,6 +3433,22 @@ context = ssl._create_unverified_context()
 tls = context.wrap_socket(allowed, server_hostname="api.openai.com")
 tls.do_handshake()
 tls.close()
+
+allowed, response = connect("pypi.org")
+if not response.startswith(b"HTTP/1.1 200"):
+    raise SystemExit(f"Task-allowed CONNECT returned {response[:64]!r}")
+tls = context.wrap_socket(allowed, server_hostname="pypi.org")
+tls.do_handshake()
+tls.close()
+
+server = http.server.ThreadingHTTPServer(("127.0.0.1", 0), http.server.SimpleHTTPRequestHandler)
+thread = threading.Thread(target=server.handle_request, daemon=True)
+thread.start()
+with urllib.request.urlopen(f"http://127.0.0.1:{server.server_port}/", timeout=3) as response:
+    if response.status != 200:
+        raise SystemExit(f"localhost fixture returned {response.status}")
+thread.join(3)
+server.server_close()
 print("ok")
 "#;
             let mut probe = Command::new("docker");
@@ -3241,6 +3463,16 @@ print("ok")
                 &format!("{CONTAINER_OWNER_LABEL}={probe_container}"),
                 "--network",
                 resources.internal_network.as_deref().unwrap(),
+            ]);
+            add_proxy_environment(
+                &mut probe,
+                &task,
+                &resources,
+                None,
+                &Default::default(),
+                "/workspace",
+            )?;
+            probe.args([
                 PROXY_HELPER_IMAGE,
                 "python3",
                 "-c",
@@ -3316,13 +3548,14 @@ print("ok")
                 &asset,
                 &format!("{PROXY_STAGING_PARENT}/{PROXY_SCRIPT_NAME}"),
             )?;
-            start_proxy_sidecar(&resources)?;
+            start_proxy_sidecar(&resources, &task)?;
 
             let script = r#"
 import json, os, socket, ssl, sys, urllib.request
 proxy = sys.argv[1]
 game_host = os.environ["GAME_SERVER_URL"].removeprefix("http://").removesuffix(":8000")
-if os.environ.get("NO_PROXY") != game_host or os.environ.get("no_proxy") != game_host:
+expected_no_proxy = f"localhost,127.0.0.1,::1,{game_host}"
+if os.environ.get("NO_PROXY") != expected_no_proxy or os.environ.get("no_proxy") != expected_no_proxy:
     raise SystemExit("game NO_PROXY contract is missing")
 
 try:
@@ -3384,7 +3617,14 @@ print(json.dumps(post("/step", {"action": "look"})))
                 task.resources.work,
             ));
             create.args(["--network", resources.internal_network.as_deref().unwrap()]);
-            add_proxy_environment(&mut create, &resources, Some((game.network(), &game_url)))?;
+            add_proxy_environment(
+                &mut create,
+                &task,
+                &resources,
+                Some((game.network(), &game_url)),
+                &Default::default(),
+                "/workspace",
+            )?;
             add_game_environment(&mut create, Some((game.network(), &game_url)))?;
             if let Some(platform) = task.work_platform.as_deref() {
                 create.args(["--platform", platform]);

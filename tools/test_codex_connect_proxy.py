@@ -87,6 +87,27 @@ class AuthorityTests(unittest.TestCase):
                 with self.assertRaises(proxy.ProxyRequestError):
                     proxy.validate_authority(authority)
 
+    def test_task_allow_hosts_are_exact_and_strictly_canonical(self) -> None:
+        with mock.patch.object(proxy, "_TASK_EXACT_HOSTS", frozenset({"pypi.org"})):
+            self.assertEqual(proxy.validate_authority("pypi.org:443"), ("pypi.org", 443))
+            for authority in ("www.pypi.org:443", "pypi.org.evil:443", "example.com:443"):
+                with self.subTest(authority=authority):
+                    with self.assertRaises(proxy.ProxyRequestError):
+                        proxy.validate_authority(authority)
+
+        for host in (
+            "PyPI.org",
+            "pypi.org.",
+            "https://pypi.org",
+            "pypi.org:443",
+            "*.pypi.org",
+            "127.0.0.1",
+            "é.example",
+        ):
+            with self.subTest(host=host):
+                with self.assertRaises(proxy.ProxyRequestError):
+                    proxy.validate_task_allow_host(host)
+
 
 class RequestTests(unittest.TestCase):
     def test_parses_connect_without_inspecting_sensitive_header_values(self) -> None:

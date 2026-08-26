@@ -18,6 +18,9 @@ bench "exchange_core_throughput" {
   work {
     cpu_limit    = 4
     memory_bytes = 17179869184
+    https_allow_hosts = [
+      "repo.maven.apache.org",
+    ]
 
     workspace_import "maven_repository" {
       source_path = "/root/.m2/repository"
@@ -27,7 +30,7 @@ bench "exchange_core_throughput" {
     image {
       ref = "docker.io/seededge/edgebench.work.exchange_core_throughput:cc0c0eabbf80"
     }
-    network_need = "none"
+    network_need = "restricted_https"
   }
 
   submission {

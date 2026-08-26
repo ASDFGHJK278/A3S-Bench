@@ -32,6 +32,7 @@ pub struct SubmissionPolicy {
 
 pub const MAX_CPU_LIMIT: u64 = 64;
 pub const MAX_MEMORY_BYTES: u64 = 256 * 1024 * 1024 * 1024;
+pub const MAX_NETWORK_ALLOW_HOSTS: usize = 64;
 
 pub const LEGACY_WORK_RESOURCES: RoleResources = RoleResources {
     cpu_limit: 4,
@@ -85,6 +86,7 @@ pub struct TaskInfo {
     pub work_image: String,
     pub work_platform: Option<String>,
     pub work_network_need: String,
+    pub work_network_allow_hosts: Vec<String>,
     pub candidate_timeout_sec: u64,
     pub metrics: Vec<MetricInfo>,
     pub workspace_seed: Option<WorkspaceSeed>,
@@ -149,9 +151,14 @@ pub fn load_local(reference: &Path) -> Result<TaskInfo> {
         .unwrap_or("none")
         .to_owned();
     anyhow::ensure!(
-        matches!(work_network_need.as_str(), "none" | "public_internet"),
-        "work.network_need must be none or public_internet"
+        matches!(
+            work_network_need.as_str(),
+            "none" | "restricted_https" | "public_internet"
+        ),
+        "work.network_need must be none, restricted_https, or public_internet"
     );
+    let work_network_allow_hosts =
+        parse_work_network_allow_hosts(work, schema, &work_network_need)?;
     let image = unique_block(work, "image")?;
     let work_image = require_string(image, "ref", None)?.to_owned();
     let metrics = block
@@ -199,6 +206,7 @@ pub fn load_local(reference: &Path) -> Result<TaskInfo> {
             .as_ref()
             .and_then(|seed| seed.platform.clone()),
         work_network_need,
+        work_network_allow_hosts,
         candidate_timeout_sec,
         metrics,
         workspace_seed,
@@ -208,6 +216,78 @@ pub fn load_local(reference: &Path) -> Result<TaskInfo> {
         legacy_judge,
         root,
     })
+}
+
+fn parse_work_network_allow_hosts(
+    work: &Block,
+    schema: &str,
+    network_need: &str,
+) -> Result<Vec<String>> {
+    let mut hosts = if work.attributes.contains_key("https_allow_hosts") {
+        anyhow::ensure!(
+            schema == "a3s-bench/task/v2",
+            "Task v1 does not support work.https_allow_hosts; use a3s-bench/task/v2"
+        );
+        string_list(work, "https_allow_hosts")?
+    } else {
+        Vec::new()
+    };
+    anyhow::ensure!(
+        hosts.len() <= MAX_NETWORK_ALLOW_HOSTS,
+        "work.https_allow_hosts exceeds the maximum of {MAX_NETWORK_ALLOW_HOSTS} hosts"
+    );
+    for host in &hosts {
+        validate_network_allow_host(host)?;
+    }
+    hosts.sort_unstable();
+    hosts.dedup();
+    match network_need {
+        "restricted_https" => anyhow::ensure!(
+            !hosts.is_empty(),
+            "work.network_need restricted_https requires work.https_allow_hosts"
+        ),
+        "none" | "public_internet" => anyhow::ensure!(
+            hosts.is_empty(),
+            "work.https_allow_hosts requires work.network_need restricted_https"
+        ),
+        _ => unreachable!("work.network_need was validated"),
+    }
+    Ok(hosts)
+}
+
+fn validate_network_allow_host(host: &str) -> Result<()> {
+    anyhow::ensure!(
+        !host.is_empty()
+            && host.len() <= 253
+            && host.is_ascii()
+            && host.bytes().all(|byte| !byte.is_ascii_control())
+            && host.bytes().all(|byte| !byte.is_ascii_uppercase())
+            && !host.ends_with('.'),
+        "work.https_allow_hosts entries must be lowercase canonical ASCII DNS hostnames"
+    );
+    anyhow::ensure!(
+        host.parse::<std::net::IpAddr>().is_err(),
+        "work.https_allow_hosts entries must not be IP literals"
+    );
+    anyhow::ensure!(
+        host.split('.').all(|label| {
+            !label.is_empty()
+                && label.len() <= 63
+                && label
+                    .as_bytes()
+                    .first()
+                    .is_some_and(u8::is_ascii_alphanumeric)
+                && label
+                    .as_bytes()
+                    .last()
+                    .is_some_and(u8::is_ascii_alphanumeric)
+                && label
+                    .bytes()
+                    .all(|byte| byte.is_ascii_alphanumeric() || byte == b'-')
+        }),
+        "work.https_allow_hosts entries must be exact DNS hostnames without URLs, ports, or wildcards"
+    );
+    Ok(())
 }
 
 fn parse_role_resources(
@@ -443,7 +523,12 @@ fn validate_task_schema(root: &Block) -> Result<()> {
             "workspace" => (&[], &["oci"], Labels::None),
             "oci" => unreachable!("OCI is nested under workspace"),
             "work" => (
-                &["network_need", "cpu_limit", "memory_bytes"],
+                &[
+                    "network_need",
+                    "https_allow_hosts",
+                    "cpu_limit",
+                    "memory_bytes",
+                ],
                 &["image", "workspace_import"],
                 Labels::None,
             ),
@@ -697,6 +782,61 @@ mod tests {
         assert!(parse(MAX_CPU_LIMIT + 1, 1024).is_err());
         assert!(parse(1, MAX_MEMORY_BYTES + 1).is_err());
         assert!(parse(MAX_CPU_LIMIT, MAX_MEMORY_BYTES).is_ok());
+    }
+
+    fn parse_network_hosts(source: &str, schema: &str, need: &str) -> Result<Vec<String>> {
+        let document = a3s_acl::parse(source).unwrap();
+        parse_work_network_allow_hosts(&document.blocks[0], schema, need)
+    }
+
+    #[test]
+    fn task_v2_normalizes_exact_https_allow_hosts() {
+        let hosts = parse_network_hosts(
+            r#"work {
+              https_allow_hosts = ["pypi.org", "files.pythonhosted.org", "pypi.org"]
+            }"#,
+            "a3s-bench/task/v2",
+            "restricted_https",
+        )
+        .unwrap();
+        assert_eq!(hosts, ["files.pythonhosted.org", "pypi.org"]);
+
+        assert!(parse_network_hosts(
+            r#"work { https_allow_hosts = ["pypi.org"] }"#,
+            "a3s-bench/task/v1",
+            "restricted_https",
+        )
+        .is_err());
+        assert!(parse_network_hosts("work {}", "a3s-bench/task/v2", "restricted_https").is_err());
+        assert!(parse_network_hosts(
+            r#"work { https_allow_hosts = ["pypi.org"] }"#,
+            "a3s-bench/task/v2",
+            "none",
+        )
+        .is_err());
+    }
+
+    #[test]
+    fn task_v2_rejects_noncanonical_or_non_dns_allow_hosts() {
+        for host in [
+            "PyPI.org",
+            "pypi.org.",
+            "https://pypi.org",
+            "pypi.org:443",
+            "*.pypi.org",
+            "127.0.0.1",
+            "::1",
+            "-bad.example",
+            "bad-.example",
+            "bad..example",
+            "é.example",
+        ] {
+            let source = format!("work {{ https_allow_hosts = [{host:?}] }}");
+            assert!(
+                parse_network_hosts(&source, "a3s-bench/task/v2", "restricted_https").is_err(),
+                "accepted unsafe host {host:?}"
+            );
+        }
     }
 
     fn parse_workspace_imports(source: &str, schema: &str) -> Result<Vec<WorkWorkspaceImport>> {

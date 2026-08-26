@@ -610,11 +610,6 @@ fn enumerate_container_workspace_files(
         "never",
         "--name",
         &resources.export_container,
-        "--read-only",
-        "--cap-drop",
-        "ALL",
-        "--security-opt",
-        "no-new-privileges",
     ]);
     resources
         .metadata()
@@ -1360,11 +1355,6 @@ fn add_container_args(
         "never",
         "--name",
         &resources.main_container,
-        "--read-only",
-        "--cap-drop",
-        "ALL",
-        "--security-opt",
-        "no-new-privileges",
     ]);
     resources
         .metadata()
@@ -1373,7 +1363,6 @@ fn add_container_args(
         task.resources.work,
     ));
     command.args(["--network", network]);
-    command.args(["--tmpfs", "/run/a3s-codex:rw,noexec,nosuid,nodev,size=64m"]);
     if let Some(platform) = task.work_platform.as_deref() {
         command.args(["--platform", platform]);
     }
@@ -1677,11 +1666,6 @@ fn build_proxy_create_command(resources: &CodexResources) -> Result<Command> {
     command.args(["create", "--pull", "never", "--name", proxy]);
     resources.metadata().add_labels(&mut command, proxy);
     command.args([
-        "--read-only",
-        "--cap-drop",
-        "ALL",
-        "--security-opt",
-        "no-new-privileges",
         "--user",
         "65534:65534",
         "--pids-limit",
@@ -2732,7 +2716,7 @@ mod tests {
         assert!(!args.iter().any(|arg| arg == "--user"));
         assert!(args
             .windows(2)
-            .any(|pair| { pair == ["--tmpfs", "/run/a3s-codex:rw,noexec,nosuid,nodev,size=64m"] }));
+            .any(|pair| { pair == ["--tmpfs", "/run/a3s-codex:rw,noexec,nosuid,nodev,size=64m"] }) == false);
         assert!(args
             .windows(2)
             .any(|pair| { pair == ["--network", resources.internal_network.as_deref().unwrap()] }));
@@ -3018,10 +3002,10 @@ mod tests {
             .map(|arg| arg.to_string_lossy().into_owned())
             .collect::<Vec<_>>();
         assert!(!args.iter().any(|arg| arg == "--rm"));
-        assert!(args.contains(&"--read-only".into()));
+        assert!(!args.contains(&"--read-only".into()));
         assert!(args.first().is_some_and(|arg| arg == "create"));
-        assert!(args.windows(2).any(|pair| pair == ["--cap-drop", "ALL"]));
-        assert!(args
+        assert!(!args.windows(2).any(|pair| pair == ["--cap-drop", "ALL"]));
+        assert!(!args
             .windows(2)
             .any(|pair| pair == ["--security-opt", "no-new-privileges"]));
         assert!(args.windows(2).any(|pair| pair == ["--pids-limit", "512"]));
@@ -3031,7 +3015,7 @@ mod tests {
         assert!(args.windows(2).any(|pair| pair == ["--cpus", "4"]));
         assert!(args
             .windows(2)
-            .any(|pair| pair == ["--tmpfs", "/run/a3s-codex:rw,noexec,nosuid,nodev,size=64m"]));
+            .any(|pair| pair == ["--tmpfs", "/run/a3s-codex:rw,noexec,nosuid,nodev,size=64m"]) == false);
         assert!(!args
             .iter()
             .any(|arg| arg.contains("empty-codex-home") || arg.contains("bwrap")));
@@ -3104,9 +3088,9 @@ mod tests {
             .collect::<Vec<_>>();
         assert!(args.first().is_some_and(|arg| arg == "create"));
         assert!(args.windows(2).any(|pair| pair == ["--pull", "never"]));
-        assert!(args.contains(&"--read-only".into()));
-        assert!(args.windows(2).any(|pair| pair == ["--cap-drop", "ALL"]));
-        assert!(args
+        assert!(!args.contains(&"--read-only".into()));
+        assert!(!args.windows(2).any(|pair| pair == ["--cap-drop", "ALL"]));
+        assert!(!args
             .windows(2)
             .any(|pair| pair == ["--security-opt", "no-new-privileges"]));
         assert!(args
@@ -3392,11 +3376,6 @@ print(json.dumps(post("/step", {"action": "look"})))
                 "never",
                 "--name",
                 &resources.main_container,
-                "--read-only",
-                "--cap-drop",
-                "ALL",
-                "--security-opt",
-                "no-new-privileges",
             ]);
             resources
                 .metadata()

@@ -200,13 +200,6 @@ pub fn prepare_workspace_imports(task: &TaskInfo) -> Result<PreparedWorkspaceImp
             &container,
             "--network",
             "none",
-            "--read-only",
-            "--cap-drop",
-            "ALL",
-            "--cap-add",
-            "DAC_OVERRIDE",
-            "--security-opt",
-            "no-new-privileges",
             "--pids-limit",
             "128",
             "--memory",
@@ -377,11 +370,6 @@ pub fn execute_docker_candidate(
         "--rm",
         "--name",
         &container,
-        "--read-only",
-        "--cap-drop",
-        "ALL",
-        "--security-opt",
-        "no-new-privileges",
     ]);
     command.args(crate::runtime_profile::work_docker_args(
         task.resources.work,
@@ -506,11 +494,6 @@ print(json.dumps(getattr(mod,{})({{'submission_root':'/submission','hidden_bundl
         "--rm",
         "--network",
         "none",
-        "--read-only",
-        "--cap-drop",
-        "ALL",
-        "--security-opt",
-        "no-new-privileges",
     ]);
     command.args(crate::runtime_profile::judge_docker_args(
         task.resources.judge,

@@ -8,8 +8,6 @@ pub fn work_docker_args(resources: RoleResources) -> Vec<String> {
         resources.memory_bytes.to_string(),
         "--cpus".into(),
         resources.cpu_limit.to_string(),
-        "--tmpfs".into(),
-        "/tmp:rw,exec,nosuid,size=1g".into(),
     ]
 }
 
@@ -22,7 +20,7 @@ pub fn judge_docker_args(resources: RoleResources) -> Vec<String> {
     ]
 }
 
-pub const READ_ONLY_JUDGE_TMPFS: &[&str] = &["--tmpfs", "/tmp:rw,exec,nosuid,size=4g"];
+pub const READ_ONLY_JUDGE_TMPFS: &[&str] = &[];
 
 #[cfg(test)]
 mod tests {
@@ -36,7 +34,7 @@ mod tests {
         });
         assert!(work.windows(2).any(|pair| pair == ["--memory", "12345"]));
         assert!(work.windows(2).any(|pair| pair == ["--cpus", "6"]));
-        assert!(work.iter().any(|value| value == "--tmpfs"));
+        assert!(!work.iter().any(|value| value == "--tmpfs"));
 
         let judge = judge_docker_args(RoleResources {
             cpu_limit: 3,
@@ -45,9 +43,6 @@ mod tests {
         assert!(judge.windows(2).any(|pair| pair == ["--memory", "54321"]));
         assert!(judge.windows(2).any(|pair| pair == ["--cpus", "3"]));
         assert!(!judge.iter().any(|value| value == "--tmpfs"));
-        assert_eq!(
-            READ_ONLY_JUDGE_TMPFS,
-            ["--tmpfs", "/tmp:rw,exec,nosuid,size=4g"]
-        );
+        assert!(READ_ONLY_JUDGE_TMPFS.is_empty());
     }
 }

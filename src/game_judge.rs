@@ -50,6 +50,7 @@ impl GameSession {
         }
         let output = process
             .args(crate::runtime_profile::judge_docker_args(resources))
+            .args(crate::runtime_profile::host_dns_args())
             .args(crate::runtime_profile::READ_ONLY_JUDGE_TMPFS)
             .args([
                 "--name",

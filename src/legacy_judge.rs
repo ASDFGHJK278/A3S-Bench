@@ -119,6 +119,9 @@ fn configure_judge_container(command: &mut Command) {
         "--add-host",
         "host.docker.internal:host-gateway",
     ]);
+    // Inject host DNS servers so Judge containers can resolve domains even
+    // when Docker Desktop's bridge-network DNS forwarding is broken.
+    command.args(crate::runtime_profile::host_dns_args());
 }
 
 #[derive(Debug, PartialEq, Eq)]

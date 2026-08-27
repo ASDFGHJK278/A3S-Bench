@@ -209,10 +209,7 @@ impl BashSandbox for DockerBashSandbox {
             "unexpected sandbox workspace"
         );
         let mut docker = Command::new("docker");
-        docker.args([
-            "run",
-            "--rm",
-        ]);
+        docker.args(["run", "--rm"]);
         docker.args(crate::runtime_profile::work_docker_args(self.resources));
         if let Some(platform) = self.platform.as_deref() {
             docker.args(["--platform", platform]);
@@ -224,8 +221,10 @@ impl BashSandbox for DockerBashSandbox {
                 "--env",
                 &format!("GAME_SERVER_URL={url}"),
             ]);
+            docker.args(crate::runtime_profile::host_dns_args());
         } else if self.public_internet {
             docker.args(["--network", "bridge"]);
+            docker.args(crate::runtime_profile::host_dns_args());
         } else {
             docker.args(["--network", "none"]);
         }

@@ -1414,6 +1414,7 @@ fn add_container_args(
         task.resources.work,
     ));
     command.args(["--network", network]);
+    command.args(crate::runtime_profile::host_dns_args());
     if let Some(platform) = task.work_platform.as_deref() {
         command.args(["--platform", platform]);
     }
@@ -1741,6 +1742,9 @@ fn build_proxy_create_command(resources: &CodexResources, task: &TaskInfo) -> Re
         "--port",
         &PROXY_PORT.to_string(),
     ]);
+    // Inject host DNS so the proxy sidecar can resolve allow-listed domains
+    // even when Docker Desktop's bridge-network DNS is broken.
+    command.args(crate::runtime_profile::host_dns_args());
     for host in &task.work_network_allow_hosts {
         command.args(["--allow-host", host]);
     }
@@ -2769,9 +2773,9 @@ mod tests {
             .iter()
             .any(|arg| arg.contains(&workspace.display().to_string())));
         assert!(!args.iter().any(|arg| arg == "--user"));
-        assert!(args
+        assert!(!args
             .windows(2)
-            .any(|pair| { pair == ["--tmpfs", "/run/a3s-codex:rw,noexec,nosuid,nodev,size=64m"] }) == false);
+            .any(|pair| { pair == ["--tmpfs", "/run/a3s-codex:rw,noexec,nosuid,nodev,size=64m"] }));
         assert!(args
             .windows(2)
             .any(|pair| { pair == ["--network", resources.internal_network.as_deref().unwrap()] }));
@@ -3166,9 +3170,9 @@ mod tests {
             .windows(2)
             .any(|pair| pair == ["--memory", "8589934592"]));
         assert!(args.windows(2).any(|pair| pair == ["--cpus", "4"]));
-        assert!(args
+        assert!(!args
             .windows(2)
-            .any(|pair| pair == ["--tmpfs", "/run/a3s-codex:rw,noexec,nosuid,nodev,size=64m"]) == false);
+            .any(|pair| pair == ["--tmpfs", "/run/a3s-codex:rw,noexec,nosuid,nodev,size=64m"]));
         assert!(!args
             .iter()
             .any(|arg| arg.contains("empty-codex-home") || arg.contains("bwrap")));

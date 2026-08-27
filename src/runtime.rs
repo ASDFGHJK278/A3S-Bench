@@ -365,23 +365,15 @@ pub fn execute_docker_candidate(
         std::process::id(),
         CANDIDATE_SEQUENCE.fetch_add(1, Ordering::Relaxed)
     );
-    command.args([
-        "run",
-        "--rm",
-        "--name",
-        &container,
-    ]);
+    command.args(["run", "--rm", "--name", &container]);
     command.args(crate::runtime_profile::work_docker_args(
         task.resources.work,
     ));
-    command.args([
-        "--network",
-        if task.work_network_need == "public_internet" {
-            "bridge"
-        } else {
-            "none"
-        },
-    ]);
+    let public_internet = task.work_network_need == "public_internet";
+    command.args(["--network", if public_internet { "bridge" } else { "none" }]);
+    if public_internet {
+        command.args(crate::runtime_profile::host_dns_args());
+    }
     if let Some(platform) = task.work_platform.as_deref() {
         command.args(["--platform", platform]);
     }
@@ -489,12 +481,7 @@ print(json.dumps(getattr(mod,{})({{'submission_root':'/submission','hidden_bundl
         serde_json::to_string(entrypoint_function)?
     );
     let mut command = Command::new("docker");
-    command.args([
-        "run",
-        "--rm",
-        "--network",
-        "none",
-    ]);
+    command.args(["run", "--rm", "--network", "none"]);
     command.args(crate::runtime_profile::judge_docker_args(
         task.resources.judge,
     ));

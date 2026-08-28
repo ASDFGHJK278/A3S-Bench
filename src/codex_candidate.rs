@@ -3281,7 +3281,10 @@ mod tests {
             .iter()
             .position(|arg| arg == PROXY_HELPER_IMAGE)
             .unwrap();
-        for dns in crate::runtime_profile::host_dns_args().chunks_exact(2) {
+        let dns_args = crate::runtime_profile::host_dns_args();
+        let (dns_pairs, remainder) = dns_args.as_chunks::<2>();
+        assert!(remainder.is_empty());
+        for dns in dns_pairs {
             assert!(args[..image_index].windows(2).any(|actual| actual == dns));
         }
         assert!(!args[image_index + 1..].iter().any(|arg| arg == "--dns"));

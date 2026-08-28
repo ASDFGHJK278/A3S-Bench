@@ -1736,15 +1736,17 @@ fn build_proxy_create_command(resources: &CodexResources, task: &TaskInfo) -> Re
         &format!("type=volume,src={tools},dst={PROXY_CONTAINER_ROOT},readonly"),
         "--entrypoint",
         "python3",
+    ]);
+    // Inject host DNS before the image name so Docker consumes these options
+    // instead of forwarding them to the proxy's argparse command line.
+    command.args(crate::runtime_profile::host_dns_args());
+    command.args([
         PROXY_HELPER_IMAGE,
         &format!("{PROXY_CONTAINER_ROOT}/{PROXY_SCRIPT_NAME}"),
         "--bind-internal",
         "--port",
         &PROXY_PORT.to_string(),
     ]);
-    // Inject host DNS so the proxy sidecar can resolve allow-listed domains
-    // even when Docker Desktop's bridge-network DNS is broken.
-    command.args(crate::runtime_profile::host_dns_args());
     for host in &task.work_network_allow_hosts {
         command.args(["--allow-host", host]);
     }
@@ -3275,7 +3277,14 @@ mod tests {
         assert!(args
             .windows(2)
             .any(|pair| pair == ["--entrypoint", "python3"]));
-        assert!(args.iter().any(|arg| arg == PROXY_HELPER_IMAGE));
+        let image_index = args
+            .iter()
+            .position(|arg| arg == PROXY_HELPER_IMAGE)
+            .unwrap();
+        for dns in crate::runtime_profile::host_dns_args().chunks_exact(2) {
+            assert!(args[..image_index].windows(2).any(|actual| actual == dns));
+        }
+        assert!(!args[image_index + 1..].iter().any(|arg| arg == "--dns"));
         assert!(args.iter().any(|arg| arg == "--bind-internal"));
         assert!(args
             .windows(2)

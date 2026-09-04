@@ -12,6 +12,7 @@ reasoning_effort="$3"
 disable_web_search="$4"
 preserve_task_proxy="$5"
 prompt="$6"
+disable_auto_resume=${A3S_CODEX_DISABLE_AUTO_RESUME:-0}
 max_resumes=100
 min_runtime_for_resume_centiseconds=100
 resume_count=0
@@ -107,7 +108,7 @@ run_initial
 status=$?
 elapsed=$(($(monotonic_centiseconds) - started))
 
-while [ ! -f "$stop_review_accepted" ] && [ "$elapsed" -ge "$min_runtime_for_resume_centiseconds" ] && [ "$resume_count" -lt "$max_resumes" ]; do
+while [ ! -f "$stop_review_accepted" ] && [ "$disable_auto_resume" != 1 ] && [ "$elapsed" -ge "$min_runtime_for_resume_centiseconds" ] && [ "$resume_count" -lt "$max_resumes" ]; do
     resume_count=$((resume_count + 1))
     printf 'Resuming Codex (attempt %d/%d)\n' "$resume_count" "$max_resumes" >&2
     started=$(monotonic_centiseconds)
@@ -116,7 +117,9 @@ while [ ! -f "$stop_review_accepted" ] && [ "$elapsed" -ge "$min_runtime_for_res
     elapsed=$(($(monotonic_centiseconds) - started))
 done
 
-if [ -f "$stop_review_accepted" ]; then
+if [ "$disable_auto_resume" = 1 ]; then
+    printf 'Codex auto-resume disabled by configuration\n' >&2
+elif [ -f "$stop_review_accepted" ]; then
     printf 'Codex stop reviewer accepted repeated convergence claims\n' >&2
 elif [ "$elapsed" -lt "$min_runtime_for_resume_centiseconds" ]; then
     printf 'Codex exited after %dms; not resuming a likely systematic failure\n' "$((elapsed * 10))" >&2

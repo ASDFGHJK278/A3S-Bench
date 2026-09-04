@@ -267,7 +267,8 @@ fn doctor(args: &[String]) -> Result<u8> {
                 "bench_config":config.bench_path,
                 "runtime":status,
                 "judge_model":config.judge_model,
-                "codex_reasoning_effort":config.codex_reasoning_effort
+                "codex_reasoning_effort":config.codex_reasoning_effort,
+                "parallel_game_sessions":config.parallel_game_sessions
             }),
         )?;
     } else {
@@ -278,6 +279,7 @@ fn doctor(args: &[String]) -> Result<u8> {
         if let Some(effort) = config.codex_reasoning_effort {
             println!("Codex reasoning effort: {effort}");
         }
+        println!("Parallel game sessions: {}", config.parallel_game_sessions);
     }
     Ok(0)
 }

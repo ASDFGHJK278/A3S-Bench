@@ -10,6 +10,7 @@ mod codex_package;
 mod comparison;
 mod config;
 mod game_judge;
+mod game_prompt;
 mod judge_source;
 mod legacy_judge;
 mod lock;

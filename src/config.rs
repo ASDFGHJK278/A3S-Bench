@@ -12,11 +12,30 @@ pub struct LocalConfig {
     pub runtime: RuntimeSelection,
     pub judge_model: Option<String>,
     pub codex_reasoning_effort: Option<String>,
+    pub disable_auto_resume: bool,
+    pub parallel_game_sessions: bool,
 }
 
 #[derive(Default)]
 struct BenchConfig {
     judge_model: Option<String>,
+}
+
+#[derive(Debug)]
+struct PrivateBenchConfig {
+    codex_reasoning_effort: Option<String>,
+    disable_auto_resume: bool,
+    parallel_game_sessions: bool,
+}
+
+impl Default for PrivateBenchConfig {
+    fn default() -> Self {
+        Self {
+            codex_reasoning_effort: None,
+            disable_auto_resume: false,
+            parallel_game_sessions: true,
+        }
+    }
 }
 
 pub struct ModelRoute {
@@ -38,7 +57,7 @@ pub fn discover(start: &Path) -> Result<LocalConfig> {
         (RuntimeSelection::bench_default()?, None)
     };
     let bench_path = discover_private_bench_path(start);
-    let codex_reasoning_effort = bench_path
+    let private_bench = bench_path
         .as_deref()
         .map(|config_path| {
             let source = std::fs::read_to_string(config_path)
@@ -48,11 +67,13 @@ pub fn discover(start: &Path) -> Result<LocalConfig> {
             parse_private_bench(&document)
         })
         .transpose()?
-        .flatten();
+        .unwrap_or_default();
     Ok(LocalConfig {
         runtime,
         judge_model,
-        codex_reasoning_effort,
+        codex_reasoning_effort: private_bench.codex_reasoning_effort,
+        disable_auto_resume: private_bench.disable_auto_resume,
+        parallel_game_sessions: private_bench.parallel_game_sessions,
         path,
         bench_path,
     })
@@ -151,20 +172,20 @@ fn parse_bench(document: &Document) -> Result<BenchConfig> {
     })
 }
 
-fn parse_private_bench(document: &Document) -> Result<Option<String>> {
+fn parse_private_bench(document: &Document) -> Result<PrivateBenchConfig> {
     let Some(block) = document.blocks.first() else {
-        return Ok(None);
+        return Ok(PrivateBenchConfig::default());
     };
     anyhow::ensure!(
         document.blocks.len() == 1
             && block.name == "bench"
             && block.labels.is_empty()
             && block.blocks.is_empty()
-            && block
-                .attributes
-                .keys()
-                .all(|name| name == "codex_reasoning_effort"),
-        "private bench config supports only codex_reasoning_effort"
+            && block.attributes.keys().all(|name| matches!(
+                name.as_str(),
+                "codex_reasoning_effort" | "disable_auto_resume" | "parallel_game_sessions"
+            )),
+        "private bench config supports only codex_reasoning_effort, disable_auto_resume, or parallel_game_sessions"
     );
     let codex_reasoning_effort = block
         .attributes
@@ -183,7 +204,31 @@ fn parse_private_bench(document: &Document) -> Result<Option<String>> {
     if let Some(effort) = codex_reasoning_effort {
         crate::lock::validate_reasoning_effort(effort)?;
     }
-    Ok(codex_reasoning_effort.map(str::to_owned))
+    let disable_auto_resume = block
+        .attributes
+        .get("disable_auto_resume")
+        .map(|value| {
+            value
+                .as_bool()
+                .ok_or_else(|| anyhow::anyhow!("bench.disable_auto_resume must be a boolean"))
+        })
+        .transpose()?
+        .unwrap_or(false);
+    let parallel_game_sessions = block
+        .attributes
+        .get("parallel_game_sessions")
+        .map(|value| {
+            value
+                .as_bool()
+                .ok_or_else(|| anyhow::anyhow!("bench.parallel_game_sessions must be a boolean"))
+        })
+        .transpose()?
+        .unwrap_or(true);
+    Ok(PrivateBenchConfig {
+        codex_reasoning_effort: codex_reasoning_effort.map(str::to_owned),
+        disable_auto_resume,
+        parallel_game_sessions,
+    })
 }
 
 fn parse_model_reference(value: &str) -> Result<(&str, &str)> {
@@ -330,10 +375,50 @@ mod tests {
         let discovered = discover(directory.path()).unwrap();
         assert_eq!(discovered.judge_model, None);
         assert_eq!(discovered.codex_reasoning_effort.as_deref(), Some("none"));
+        assert!(!discovered.disable_auto_resume);
+        assert!(discovered.parallel_game_sessions);
         assert_eq!(
             discovered.bench_path.as_deref(),
             Some(config_directory.join("config.acl").as_path())
         );
+    }
+
+    #[test]
+    fn discovers_disable_auto_resume() {
+        let directory = tempfile::tempdir().unwrap();
+        let config_directory = directory.path().join(".a3s/bench");
+        std::fs::create_dir_all(&config_directory).unwrap();
+        std::fs::write(
+            config_directory.join("config.acl"),
+            "bench { disable_auto_resume = true }",
+        )
+        .unwrap();
+        let discovered = discover(directory.path()).unwrap();
+        assert!(discovered.disable_auto_resume);
+        assert!(discovered.parallel_game_sessions);
+    }
+
+    #[test]
+    fn discovers_disabled_parallel_game_sessions() {
+        let directory = tempfile::tempdir().unwrap();
+        let config_directory = directory.path().join(".a3s/bench");
+        std::fs::create_dir_all(&config_directory).unwrap();
+        std::fs::write(
+            config_directory.join("config.acl"),
+            "bench { parallel_game_sessions = false }",
+        )
+        .unwrap();
+        let discovered = discover(directory.path()).unwrap();
+        assert!(!discovered.parallel_game_sessions);
+    }
+
+    #[test]
+    fn rejects_non_boolean_parallel_game_sessions() {
+        let document = a3s_acl::parse(r#"bench { parallel_game_sessions = "false" }"#).unwrap();
+        let error = parse_private_bench(&document).unwrap_err();
+        assert!(error
+            .to_string()
+            .contains("bench.parallel_game_sessions must be a boolean"));
     }
 
     #[test]

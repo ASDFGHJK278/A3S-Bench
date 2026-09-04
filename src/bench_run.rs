@@ -121,7 +121,7 @@ fn execute_inner(
         ),
     }
     journal.advance(RunStage::InputsResolved)?;
-    let game = start_game(&loaded.task, state_root)?;
+    let game = start_game(&loaded.task, state_root, config.parallel_game_sessions)?;
     let mut transient = TransientRunDirs::new();
     let native_codex = loaded.candidate.protocol == asset::CandidateProtocol::CodexExec;
     let candidate_workspace = if native_codex {
@@ -260,13 +260,20 @@ fn judge_identity(asset_identity: &str, model: Option<&JudgeModel>) -> String {
     }
 }
 
-fn start_game(task: &task::TaskInfo, state_root: &Path) -> Result<Option<game_judge::GameSession>> {
+fn start_game(
+    task: &task::TaskInfo,
+    state_root: &Path,
+    parallel_game_sessions: bool,
+) -> Result<Option<game_judge::GameSession>> {
     match task.legacy_judge.as_ref() {
-        Some(source) if source.mode == "game_server" => Ok(Some(game_judge::GameSession::start(
-            source,
-            task.resources.judge,
-            state_root,
-        )?)),
+        Some(source) if source.mode == "game_server" => {
+            Ok(Some(game_judge::GameSession::start_with_parallel_sessions(
+                source,
+                task.resources.judge,
+                state_root,
+                parallel_game_sessions,
+            )?))
+        }
         _ => Ok(None),
     }
 }
@@ -313,6 +320,8 @@ fn execute_candidate(
             task_prompt: &prompt,
             model,
             reasoning_effort,
+            disable_auto_resume: config.disable_auto_resume,
+            parallel_game_sessions: config.parallel_game_sessions,
             game_network: game.map(|session| {
                 (
                     session.network(),
@@ -426,6 +435,7 @@ fn execute_candidate(
         public_internet: task.work_network_need == "public_internet",
         timeout_sec: task.candidate_timeout_sec,
         max_tool_rounds: candidate.model_max_steps()?,
+        parallel_game_sessions: config.parallel_game_sessions,
         log_dir: Some(&log_dir),
     })?;
     Ok(match outcome {

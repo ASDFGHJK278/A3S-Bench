@@ -34,6 +34,7 @@ pub struct ModelCandidateRequest<'a> {
     pub public_internet: bool,
     pub timeout_sec: u64,
     pub max_tool_rounds: usize,
+    pub parallel_game_sessions: bool,
     /// Optional directory for persisting the candidate's full conversation
     /// history (session snapshot JSON + JSONL trajectory).  When set, a
     /// sub-directory is created for this run so that every task's dialogue
@@ -134,6 +135,14 @@ async fn execute_async(request: ModelCandidateRequest<'_>) -> Result<ModelCandid
 }
 
 fn candidate_prompt(request: &ModelCandidateRequest<'_>) -> String {
+    if request.game_network.is_some() {
+        return crate::game_prompt::candidate_prompt(
+            request.candidate_instructions,
+            request.task_prompt,
+            request.public_internet,
+            request.parallel_game_sessions,
+        );
+    }
     format!(
         "{}\n\n# Benchmark task\n\n{}\n\n# Workspace contract\n\n{}\n\nComplete the task and verify the result.",
         request.candidate_instructions,
@@ -190,6 +199,23 @@ fn candidate_session_options(
     options
 }
 
+fn model_game_server_host(url: &str) -> Result<&str> {
+    let host = url
+        .strip_prefix("http://")
+        .and_then(|authority| authority.strip_suffix(":8000"))
+        .context("A3SCode game server URL must use http and port 8000")?;
+    anyhow::ensure!(
+        !host.is_empty()
+            && host.len() <= 253
+            && host.starts_with("a3s-bench-game-")
+            && host
+                .bytes()
+                .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_' | b'.')),
+        "A3SCode game server URL contains an invalid container name"
+    );
+    Ok(host)
+}
+
 struct DockerBashSandbox {
     image: String,
     platform: Option<String>,
@@ -215,12 +241,12 @@ impl BashSandbox for DockerBashSandbox {
             docker.args(["--platform", platform]);
         }
         if let Some((network, url)) = &self.game_network {
-            docker.args([
-                "--network",
-                network,
-                "--env",
-                &format!("GAME_SERVER_URL={url}"),
-            ]);
+            let host = model_game_server_host(url)?;
+            let no_proxy = format!("localhost,127.0.0.1,::1,{host}");
+            docker.args(["--network", network]);
+            docker.arg("--env").arg(format!("GAME_SERVER_URL={url}"));
+            docker.arg("--env").arg(format!("NO_PROXY={no_proxy}"));
+            docker.arg("--env").arg(format!("no_proxy={no_proxy}"));
             docker.args(crate::runtime_profile::host_dns_args());
         } else if self.public_internet {
             docker.args(["--network", "bridge"]);
@@ -337,6 +363,46 @@ mod tests {
         assert!(contract.contains("public, read-only task fixtures"));
         assert!(contract.contains("all deliverable writes must stay inside `/workspace`"));
     }
+    #[test]
+    fn game_candidate_uses_the_shared_sessionful_prompt() {
+        let workspace = tempfile::tempdir().unwrap();
+        let workspace_imports = Default::default();
+        let mut request = ModelCandidateRequest {
+            config_path: Path::new("unused.acl"),
+            model: "openai/fake",
+            task_prompt: "play carefully",
+            candidate_instructions: "candidate instructions",
+            workspace: workspace.path(),
+            workspace_source_path: Some("/home/workspace/source"),
+            work_image: "unused:test",
+            work_platform: None,
+            work_resources: crate::task::LEGACY_WORK_RESOURCES,
+            workspace_imports: &workspace_imports,
+            game_network: Some(("game-network", "http://a3s-bench-game-example:8000")),
+            public_internet: false,
+            timeout_sec: 1,
+            max_tool_rounds: 1,
+            parallel_game_sessions: true,
+            log_dir: None,
+        };
+
+        let prompt = candidate_prompt(&request);
+        assert!(prompt.contains("## Game Mode"));
+        assert!(prompt.contains("POST {GAME_SERVER_URL}/{session_id}/step"));
+        assert!(prompt.contains("You can start multiple game sessions"));
+        assert!(prompt.contains("Your **best score** across all game sessions"));
+        assert!(!prompt.contains("up to three sessions active"));
+        assert!(!prompt.contains("# Workspace contract"));
+        request.parallel_game_sessions = false;
+        let serial_prompt = candidate_prompt(&request);
+        assert!(serial_prompt.contains("Only one game session can be active at a time"));
+        assert!(!serial_prompt.contains("You can start multiple game sessions"));
+        assert_eq!(
+            model_game_server_host("http://a3s-bench-game-example:8000").unwrap(),
+            "a3s-bench-game-example"
+        );
+        assert!(model_game_server_host("https://example.invalid").is_err());
+    }
 
     #[test]
     fn bundled_candidate_keeps_current_code_capabilities_enabled() {
@@ -407,6 +473,7 @@ mod tests {
             public_internet: false,
             timeout_sec: 1,
             max_tool_rounds: 1,
+            parallel_game_sessions: true,
             log_dir: None,
         })
         .unwrap_err();
@@ -595,6 +662,7 @@ mod tests {
             public_internet: false,
             timeout_sec: 30,
             max_tool_rounds: 32,
+            parallel_game_sessions: true,
             log_dir: None,
         })
         .unwrap();

@@ -63,6 +63,8 @@ pub struct CodexExecutionRequest<'a> {
     pub task_prompt: &'a str,
     pub model: Option<&'a str>,
     pub reasoning_effort: Option<&'a str>,
+    pub disable_auto_resume: bool,
+    pub parallel_game_sessions: bool,
     pub game_network: Option<(&'a str, &'a str)>,
     pub timeout_sec: u64,
     pub state_root: &'a Path,
@@ -889,6 +891,7 @@ fn build_codex_run_command(
         request.package,
         request.workspace_imports,
         container_workspace,
+        request.disable_auto_resume,
     )?;
     add_proxy_environment(
         &mut command,
@@ -931,23 +934,17 @@ fn build_codex_run_command(
 }
 
 fn candidate_prompt(request: &CodexExecutionRequest<'_>) -> String {
-    let completion_contract = if request.game_network.is_some() {
-        r#"# Interactive game channel
-
-This task is completed by playing the protected game, not by editing workspace files. The game server base URL is available in `GAME_SERVER_URL`. Use the shell and an HTTP client to:
-
-- send `POST /new` with `{}` to start a game;
-- send `POST /step` with `{"action":"<game command>"}` for each move;
-- send `GET /status` to inspect the current state; and
-- optionally send `POST /close` with `{}` after the final move.
-
-The Judge scores the current session's `peak_score`. Calling `/new` resets the current score, peak score, and move count, so finish with the strongest run you want scored. Continue issuing game commands until you have made a serious attempt to maximize the score."#
-    } else {
-        "Work only in the supplied workspace and complete the task."
-    };
+    if request.game_network.is_some() {
+        return crate::game_prompt::candidate_prompt(
+            request.instructions,
+            request.task_prompt,
+            request.task.work_network_need == "public_internet",
+            request.parallel_game_sessions,
+        );
+    }
     format!(
-        "{}\n\n# Benchmark task\n\n{}\n\n{}",
-        request.instructions, request.task_prompt, completion_contract
+        "{}\n\n# Benchmark task\n\n{}\n\nWork only in the supplied workspace and complete the task.",
+        request.instructions, request.task_prompt
     )
 }
 
@@ -1287,6 +1284,7 @@ fn add_codex_environment(
     package: &CachedCodexPackage,
     workspace_imports: &crate::runtime::PreparedWorkspaceImports,
     container_workspace: &str,
+    disable_auto_resume: bool,
 ) -> Result<()> {
     let paths = package.container_paths()?;
     command
@@ -1299,6 +1297,9 @@ fn add_codex_environment(
         container_path(&paths.code_mode_host)
     ));
     command.args(["--env", "LANG=C.UTF-8", "--env", "NO_COLOR=1"]);
+    if disable_auto_resume {
+        command.arg("--env").arg("A3S_CODEX_DISABLE_AUTO_RESUME=1");
+    }
     workspace_imports.add_environment(command, container_workspace);
     Ok(())
 }
@@ -1736,15 +1737,17 @@ fn build_proxy_create_command(resources: &CodexResources, task: &TaskInfo) -> Re
         &format!("type=volume,src={tools},dst={PROXY_CONTAINER_ROOT},readonly"),
         "--entrypoint",
         "python3",
+    ]);
+    // Docker options must precede the image reference. Otherwise the proxy
+    // script receives them as application arguments and exits during parsing.
+    command.args(crate::runtime_profile::host_dns_args());
+    command.args([
         PROXY_HELPER_IMAGE,
         &format!("{PROXY_CONTAINER_ROOT}/{PROXY_SCRIPT_NAME}"),
         "--bind-internal",
         "--port",
         &PROXY_PORT.to_string(),
     ]);
-    // Inject host DNS so the proxy sidecar can resolve allow-listed domains
-    // even when Docker Desktop's bridge-network DNS is broken.
-    command.args(crate::runtime_profile::host_dns_args());
     for host in &task.work_network_allow_hosts {
         command.args(["--allow-host", host]);
     }
@@ -2690,6 +2693,8 @@ mod tests {
             task_prompt: "task",
             model: Some("gpt-5.3-codex-spark"),
             reasoning_effort: Some("low"),
+            disable_auto_resume: false,
+            parallel_game_sessions: true,
             game_network: None,
             timeout_sec: 1,
             state_root: home.path(),
@@ -2883,10 +2888,16 @@ mod tests {
             .windows(2)
             .any(|pair| pair == ["--network", "a3s-bench-game-test"]));
         let game_prompt = candidate_prompt(&request);
-        assert!(game_prompt.contains("POST /new"));
-        assert!(game_prompt.contains("POST /step"));
-        assert!(game_prompt.contains("Calling `/new` resets"));
-        assert!(game_prompt.contains("not by editing workspace files"));
+        assert!(game_prompt.contains("## Game Mode"));
+        assert!(game_prompt.contains("POST {GAME_SERVER_URL}/{session_id}/step"));
+        assert!(game_prompt.contains("You can start multiple game sessions"));
+        assert!(game_prompt.contains("Your **best score** across all game sessions"));
+        assert!(!game_prompt.contains("up to three sessions active"));
+        assert!(!game_prompt.contains("Do not edit workspace files"));
+        request.parallel_game_sessions = false;
+        let serial_game_prompt = candidate_prompt(&request);
+        assert!(serial_game_prompt.contains("Only one game session can be active at a time"));
+        assert!(!serial_game_prompt.contains("You can start multiple game sessions"));
         let game_config_overrides = game_args
             .windows(2)
             .filter(|pair| pair[0] == "-c")
@@ -3122,6 +3133,26 @@ mod tests {
         assert_eq!(std::fs::read_to_string(&log).unwrap().lines().count(), 1);
         assert!(String::from_utf8_lossy(&output.stderr)
             .contains("accepted repeated convergence claims"));
+
+        std::fs::write(
+            &fake_codex,
+            "#!/bin/sh\nprintf '%s\\n' \"$*\" >>\"$RUN_LOOP_LOG\"\nsleep 1\n",
+        )
+        .unwrap();
+        std::fs::set_permissions(&fake_codex, std::fs::Permissions::from_mode(0o755)).unwrap();
+        std::fs::write(&log, "").unwrap();
+        let output = Command::new("/bin/sh")
+            .arg(harness.join(RUN_LOOP_SCRIPT_NAME))
+            .arg(&fake_codex)
+            .args(["gpt-5.3-codex-spark", "low", "1", "0", "prompt"])
+            .env("RUN_LOOP_LOG", &log)
+            .env("A3S_CODEX_DISABLE_AUTO_RESUME", "1")
+            .output()
+            .unwrap();
+        assert!(output.status.success());
+        assert_eq!(std::fs::read_to_string(&log).unwrap().lines().count(), 1);
+        assert!(String::from_utf8_lossy(&output.stderr)
+            .contains("auto-resume disabled by configuration"));
     }
 
     #[test]
@@ -3277,6 +3308,18 @@ mod tests {
             .any(|pair| pair == ["--entrypoint", "python3"]));
         assert!(args.iter().any(|arg| arg == PROXY_HELPER_IMAGE));
         assert!(args.iter().any(|arg| arg == "--bind-internal"));
+        let image_index = args
+            .iter()
+            .position(|arg| arg == PROXY_HELPER_IMAGE)
+            .unwrap();
+        assert!(args
+            .iter()
+            .enumerate()
+            .all(|(index, arg)| arg != "--dns" || index < image_index));
+        assert!(args
+            .iter()
+            .enumerate()
+            .all(|(index, arg)| arg != "--allow-host" || index > image_index));
         assert!(args
             .windows(2)
             .any(|pair| pair == ["--allow-host", "pypi.org"]));
@@ -3414,7 +3457,7 @@ else:
     raise SystemExit("direct public socket unexpectedly succeeded")
 
 def connect(authority):
-    sock = socket.create_connection((proxy, 3128), 3)
+    sock = socket.create_connection((proxy, 3128), 15)
     request = (
         f"CONNECT {authority}:443 HTTP/1.1\r\n"
         f"Host: {authority}:443\r\n\r\n"
@@ -3571,7 +3614,7 @@ else:
     raise SystemExit("direct public socket unexpectedly succeeded")
 
 def connect(authority):
-    sock = socket.create_connection((proxy, 3128), 3)
+    sock = socket.create_connection((proxy, 3128), 15)
     request = (
         f"CONNECT {authority}:443 HTTP/1.1\r\n"
         f"Host: {authority}:443\r\n\r\n"
@@ -3603,8 +3646,8 @@ def post(path, payload):
     )
     return json.loads(urllib.request.urlopen(request, timeout=5).read())
 
-post("/new", {})
-print(json.dumps(post("/step", {"action": "look"})))
+game = post("/new", {})
+print(json.dumps(post(f"/{game['session_id']}/step", {"action": "look"})))
 "#;
             let mut create = Command::new("docker");
             create.args([

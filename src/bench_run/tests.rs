@@ -104,6 +104,8 @@ fn model_judge_requires_an_explicit_local_route() {
         runtime: crate::runtime_selection::RuntimeSelection::bench_default().unwrap(),
         judge_model: None,
         codex_reasoning_effort: None,
+        disable_auto_resume: false,
+        parallel_game_sessions: true,
     };
     let error = resolve_judge_model(&task, None, &config).err().unwrap();
     assert!(error.to_string().contains("requires bench.judge_model"));
@@ -150,7 +152,7 @@ fn model_candidate_game_and_task_owned_judge_run_end_to_end() {
     let locked = lock::load_task(&task_lock_path, state.path()).unwrap();
     let mut task = task::load_local(&locked.task_artifact).unwrap();
     resolve_task_images(&mut task, &locked.lock.resolved_images).unwrap();
-    let game = start_game(&task, state.path()).unwrap().unwrap();
+    let game = start_game(&task, state.path(), true).unwrap().unwrap();
     let candidate_root = state.path().join("candidate");
     std::fs::create_dir(&candidate_root).unwrap();
     std::fs::write(
@@ -215,7 +217,7 @@ fn serve_game_model(listener: TcpListener) {
             "tool_calls":[{"id":"call_1","type":"function","function":{
                 "name":"bash",
                 "arguments":serde_json::to_string(&serde_json::json!({
-                    "cmd":"python -c \"import json,os,urllib.request; u=os.environ['GAME_SERVER_URL']+'/new'; r=urllib.request.Request(u,data=b'{}',headers={'Content-Type':'application/json'}); print(urllib.request.urlopen(r).read().decode())\""
+                    "cmd":"python -c \"import json,os,urllib.request; base=os.environ['GAME_SERVER_URL']; r=urllib.request.Request(base+'/new',data=b'{}',headers={'Content-Type':'application/json'}); game=json.loads(urllib.request.urlopen(r).read()); r=urllib.request.Request(base+'/'+game['session_id']+'/step',data=json.dumps({'action':'look'}).encode(),headers={'Content-Type':'application/json'}); print(urllib.request.urlopen(r).read().decode())\""
                 })).unwrap()
             }}]
         }),
